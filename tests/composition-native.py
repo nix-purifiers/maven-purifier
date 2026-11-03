@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 """Lock and use a Nix-provided JVM dependency through the ordinary Maven loop."""
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ ET.register_namespace("", "http://maven.apache.org/POM/4.0.0")
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('cli', type=Path)
+parser.add_argument('--gradle-producer', help='Nix reference to the real Gradle java-library fixture')
 args = parser.parse_args()
 cli = args.cli.resolve()
 root = Path(__file__).resolve().parents[1]
@@ -21,10 +23,37 @@ snapshot = json.loads(subprocess.check_output(['nix', 'flake', 'metadata', '--js
     '--no-write-lock-file', 'path:'+str(root)], text=True))['path']
 with tempfile.TemporaryDirectory(prefix='maven-project-input-') as temporary:
     subprocess.run(['nix-store', '--add-root', str(Path(temporary)/'source'), '--realise', snapshot], check=True)
-    reference = 'path:' + snapshot + '#checks.' + system + '.composition.producer'
+    reference = args.gradle_producer or ('path:' + snapshot + '#checks.' + system + '.composition.producer')
+
+    def use_gradle_publication(project):
+        if not args.gradle_producer:
+            return
+        pom = project / 'core/pom.xml'
+        model = ET.parse(pom)
+        dependencies = model.find('./{*}dependencies')
+        dependency = ET.SubElement(dependencies, '{http://maven.apache.org/POM/4.0.0}dependency')
+        for name, value in [('groupId', 'example'), ('artifactId', 'greeting'), ('version', '99')]:
+            ET.SubElement(dependency, '{http://maven.apache.org/POM/4.0.0}' + name).text = value
+        model.write(pom, encoding='utf-8', xml_declaration=True)
+        source = project / 'core/src/main/java/example/multi/core/Greeting.java'
+        original = 'return "Hello, " + StringUtils.capitalize(name) + "!";'
+        assert original in source.read_text()
+        source.write_text(source.read_text().replace(original, '''String expected = "Hello, " + StringUtils.capitalize(name) + "!";
+    if (!example.Greeting.loud(name).equals(expected.toUpperCase(java.util.Locale.ROOT)))
+      throw new AssertionError("Gradle producer behavior differs");
+    return expected;'''))
+    def copy_fixture(project):
+        shutil.copytree(root / 'tests/fixtures/multi', project)
+        # Immutable source snapshots have read-only modes; the working tree
+        # must permit the same edits a developer makes after checkout.
+        for path in [project, *project.rglob('*')]:
+            if not path.is_symlink():
+                path.chmod(path.stat().st_mode | 0o200)
+
     project = Path(temporary) / 'project'
-    shutil.copytree(root / 'tests/fixtures/multi', project)
+    copy_fixture(project)
     (project / 'maven-purifier.lock.json').unlink()
+    use_gradle_publication(project)
     original_poms = {path.relative_to(project): path.read_bytes() for path in project.rglob('pom.xml')}
 
     def run(*command):
@@ -46,8 +75,9 @@ with tempfile.TemporaryDirectory(prefix='maven-project-input-') as temporary:
     # The supplied library occurs only behind commons-text: no direct edge
     # or pre-existing management entry can accidentally make this pass.
     project = Path(temporary) / 'transitive-project'
-    shutil.copytree(root / 'tests/fixtures/multi', project)
+    copy_fixture(project)
     (project / 'maven-purifier.lock.json').unlink()
+    use_gradle_publication(project)
     parent = project / 'pom.xml'
     model = ET.parse(parent)
     managed = model.find('.//{*}dependencyManagement/{*}dependencies')
@@ -108,7 +138,7 @@ with tempfile.TemporaryDirectory(prefix='maven-project-input-') as temporary:
       String greeting = (String)Class.forName("example.multi.core.Greeting").getMethod("greet", String.class).invoke(null, "nix");
       if (!"Hello, Nix!".equals(greeting)) throw new AssertionError(greeting);
       for (String name : new String[]{"org.apache.commons.lang3.StringUtils", "org.apache.commons.text.WordUtils"}) {
-        String location = Class.forName(name).getProtectionDomain().getCodeSource().getLocation().toString();
+        String location = java.nio.file.Paths.get(Class.forName(name).getProtectionDomain().getCodeSource().getLocation().toURI()).getFileName().toString();
         if (!location.contains("-nix-")) throw new AssertionError(location);
       }
       System.out.println("ORDINARY MAVEN TRANSITIVE COMPOSITION PASSED");
@@ -125,3 +155,10 @@ with tempfile.TemporaryDirectory(prefix='maven-project-input-') as temporary:
         'package', 'dependency:build-classpath', '-Dmdep.outputFile=classpath'], cwd=downstream, env=plain, check=True)
     subprocess.run([str(tools/'jdk/bin/java'), '-cp', str(downstream/'target/classes')+os.pathsep
         +(downstream/'classpath').read_text().strip(), 'Downstream'], cwd=downstream, env=plain, check=True)
+    if os.environ.get('PURIFIER_JVM_GRAPH_HELPER'):
+        spec = importlib.util.spec_from_file_location('downstream_graph', os.environ['PURIFIER_JVM_GRAPH_HELPER'])
+        graph = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(graph)
+        graph.exercise(repository, ('example.multi', 'core', publication.parent.name),
+            'example.multi.core.Greeting.greet("nix")', 'Hello, Nix!', tools,
+            Path(temporary) / 'downstream-graphs')
