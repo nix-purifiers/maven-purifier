@@ -8,6 +8,8 @@ import org.junit.jupiter.api.Test;
 class SourcesTest {
   @Test
   void usesEverySource() throws Exception {
-    assertEquals("Lang3 txt Text snapshot LoggerFactory linux", Sources.describe());
+    // os-maven-plugin names macOS osx.
+    String os = System.getProperty("os.name").startsWith("Mac") ? "osx" : "linux";
+    assertEquals("Lang3 txt Text snapshot LoggerFactory " + os, Sources.describe());
   }
 }

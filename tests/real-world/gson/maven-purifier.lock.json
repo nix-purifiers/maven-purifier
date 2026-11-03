@@ -1416,6 +1416,14 @@
       ]
     },
     {
+      "path": "com/google/protobuf/protoc/4.35.1/protoc-4.35.1-osx-aarch_64.exe",
+      "url": "https://repo1.maven.org/maven2/com/google/protobuf/protoc/4.35.1/protoc-4.35.1-osx-aarch_64.exe",
+      "hash": "sha256-2BxtkkD3640Y1BxqvJzWyniW43DHtXWt/PL6HWAHJ94=",
+      "systems": [
+        "aarch64-darwin"
+      ]
+    },
+    {
       "path": "com/google/testparameterinjector/test-parameter-injector-parent/1.22/test-parameter-injector-parent-1.22.pom",
       "url": "https://repo1.maven.org/maven2/com/google/testparameterinjector/test-parameter-injector-parent/1.22/test-parameter-injector-parent-1.22.pom",
       "hash": "sha256-XvKeLMD45fPVrrgC6QmSuYPe62Uz2rqjt99WqtNBvaE="
@@ -8917,5 +8925,5 @@
       "development": true
     }
   ],
-  "lockHash": "sha256:275f42e0c2aabf9821af995c39ebcdf769af81bbfd2bf49d4dd8796704539c80"
+  "lockHash": "sha256:d5c1aa59ba2dc1bff48f1c84553c79d5334648204fbef455e20e725b136d7c03"
 }

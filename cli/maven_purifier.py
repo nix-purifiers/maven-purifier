@@ -361,14 +361,26 @@ def fetch_url(url):
 # The classifiers that os-maven-plugin gives each Nix system of the
 # nix-purifiers. Builds that need a native binary, such as protoc or
 # netty's transports, name it by such a classifier.
-PLATFORM_CLASSIFIERS = {"x86_64-linux": "linux-x86_64", "aarch64-linux": "linux-aarch_64"}
+PLATFORM_CLASSIFIERS = {
+    "x86_64-linux": "linux-x86_64",
+    "aarch64-linux": "linux-aarch_64",
+    "aarch64-darwin": "osx-aarch_64",
+}
 
 
 def native_system():
-    machine = os.uname().machine
-    system = {"x86_64": "x86_64-linux", "aarch64": "aarch64-linux", "arm64": "aarch64-linux"}.get(machine)
+    uname = os.uname()
+    system = {
+        ("Linux", "x86_64"): "x86_64-linux",
+        ("Linux", "aarch64"): "aarch64-linux",
+        ("Linux", "arm64"): "aarch64-linux",
+        ("Darwin", "arm64"): "aarch64-darwin",
+    }.get((uname.sysname, uname.machine))
     if system is None:
-        fail(f"maven-purifier runs on x86_64-linux and aarch64-linux, and this machine is {machine}")
+        fail(
+            "maven-purifier runs on x86_64-linux, aarch64-linux and aarch64-darwin, "
+            f"and this machine is {uname.sysname} {uname.machine}"
+        )
     return system
 
 
@@ -458,7 +470,10 @@ def locked_jdk(major):
         ).stdout.strip()
     except subprocess.CalledProcessError:
         fail(f"nixpkgs has no headless JDK {major}, the Java major version of the lock")
-    return f"{jdk}/lib/openjdk"
+    # The home of nixpkgs' OpenJDK is its lib/openjdk. On darwin the JDK is
+    # Azul Zulu, whose store path is the home, as its `home` attribute says.
+    home = f"{jdk}/lib/openjdk"
+    return home if os.path.isdir(home) else jdk
 
 
 def java_version(home):

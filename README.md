@@ -380,7 +380,7 @@ projects.
 [Gson](https://github.com/google/gson) is Google's JSON library, a Maven
 build of several modules. Its `proto` module runs protoc, a native binary
 that Maven downloads for the machine it runs on; the lock holds protoc for
-both Linux systems.
+both Linux systems and aarch64-darwin.
 
 From a clone of Gson, lock the build and prefetch it:
 

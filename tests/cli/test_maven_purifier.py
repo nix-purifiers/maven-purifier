@@ -384,12 +384,22 @@ class PlatformCounterparts(unittest.TestCase):
         path = "com/google/protobuf/protoc/4.35.1/protoc-4.35.1-linux-x86_64.exe"
         self.assertEqual(
             mp.platform_counterparts(path, "x86_64-linux"),
-            {"aarch64-linux": "com/google/protobuf/protoc/4.35.1/protoc-4.35.1-linux-aarch_64.exe"},
+            {
+                "aarch64-linux": "com/google/protobuf/protoc/4.35.1/protoc-4.35.1-linux-aarch_64.exe",
+                "aarch64-darwin": "com/google/protobuf/protoc/4.35.1/protoc-4.35.1-osx-aarch_64.exe",
+            },
+        )
+        self.assertEqual(
+            mp.platform_counterparts(path.replace("linux-x86_64", "osx-aarch_64"), "aarch64-darwin"),
+            {"x86_64-linux": path, "aarch64-linux": path.replace("linux-x86_64", "linux-aarch_64")},
         )
         jar = "io/netty/netty-transport-native-epoll/4.1.0/netty-transport-native-epoll-4.1.0-linux-aarch_64.jar"
         self.assertEqual(
             mp.platform_counterparts(jar, "aarch64-linux"),
-            {"x86_64-linux": jar.replace("linux-aarch_64", "linux-x86_64")},
+            {
+                "x86_64-linux": jar.replace("linux-aarch_64", "linux-x86_64"),
+                "aarch64-darwin": jar.replace("linux-aarch_64", "osx-aarch_64"),
+            },
         )
 
     def test_other_files(self):
