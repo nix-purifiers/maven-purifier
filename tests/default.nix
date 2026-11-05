@@ -24,6 +24,8 @@ let
   # core, and its JUnit 5 test runs in `tests`.
   multi = build { src = ./fixtures/multi; };
 
+  onlineGoal = build { src = ./fixtures/online-goal; };
+
   # The lock names the artifacts of each package, so a consumer reaches
   # them without building first. app runs from the jars of the packages
   # and the locked commons-lang3.
@@ -322,8 +324,11 @@ let
         # javac wants each public class in a file of its name.
         cp ${../extension/src/io/github/nixpurifiers/maven/RecordingEventSpy.java} src/RecordingEventSpy.java
         cp ${./extension/io/github/nixpurifiers/maven/RecordingEventSpyTest.java} src/RecordingEventSpyTest.java
+        cp ${../extension/src/io/github/nixpurifiers/maven/LockedReplayParticipant.java} src/LockedReplayParticipant.java
+        cp ${./extension/io/github/nixpurifiers/maven/LockedReplayParticipantTest.java} src/LockedReplayParticipantTest.java
         javac -Xlint:-deprecation -d classes -cp "${pkgs.maven}/maven/lib/*" src/*.java
         java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.RecordingEventSpyTest
+        java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.LockedReplayParticipantTest
         touch $out
       '';
 
@@ -395,6 +400,12 @@ in
   multi-app = multi.packages.app;
   multi-core = multi.packages.core;
   multi-tests = multi.tests;
+  online-goal = pkgs.runCommand "maven-purifier-online-goal" { } ''
+    bom=${onlineGoal.packages.online-goal.artifacts."online-goal-cyclonedx.json"}
+    grep -q 'commons-lang3' "$bom"
+    test -f ${onlineGoal.packages.online-goal.artifacts."online-goal-cyclonedx.xml"}
+    touch $out
+  '';
   multi-runs = multiRuns;
   multi-publish = multiPublish;
   sources = sources.packages.sources;

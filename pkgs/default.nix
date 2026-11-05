@@ -16,5 +16,6 @@ in
   # The builder (nix/lib/build-maven-project.nix), on the purifier library.
   buildMavenProject = callPackage ../nix/lib/build-maven-project.nix {
     inherit (lib) purifier;
+    inherit extension;
   };
 }
