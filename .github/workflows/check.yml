@@ -101,6 +101,10 @@ jobs:
       - name: Lock and use a Nix-built JVM dependency
         run: |
           "$RUNNER_TEMP/python/bin/python3" tests/composition-native.py "$RUNNER_TEMP/cli/bin/maven-purifier"
+      - name: Capture and replay an online-marked goal without resolver fallback
+        run: >-
+          "$RUNNER_TEMP/python/bin/python3" tests/online-goal-native.py
+          "$RUNNER_TEMP/cli/bin/maven-purifier"
       - name: Build, test and open the editor with the network cut off
         run: |
           cd "$RUNNER_TEMP/multi"

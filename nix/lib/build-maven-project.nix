@@ -51,6 +51,7 @@ arguments@{
   javaPackages,
   # The purifier library, which the overlay passes.
   purifier,
+  extension,
 }:
 {
   # The root of the Maven build.
@@ -258,6 +259,7 @@ let
       exit 1
     }
     ${maven}/bin/mvn -o -B \
+      ${lib.optionalString (lib.versionAtLeast lock.version "3.1") "-Dmaven.ext.class.path=${extension}/share/java/maven-purifier-extension.jar -Dmaven-purifier.replay=true"} \
       -s ${settings} \
       -Dmaven.repo.local="$TMPDIR/repository" \
       -Duser.home="$HOME" \

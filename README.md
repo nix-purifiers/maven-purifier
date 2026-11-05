@@ -236,6 +236,14 @@ purifier from that package set or pass a compatible toolchain to the builder.
 
 ## Working offline
 
+On Maven 3.1 and newer (including Maven 4), locked replay keeps Maven's repository resolver offline while
+allowing goals marked `requiresOnline` to execute. Otherwise Maven silently
+skips goals such as CycloneDX and SPDX generation, changing the published
+artifacts. Missing repository downloads still fail offline; a plugin that uses
+its own network client must also work without that network in a Nix build.
+The extension refuses replay if its repository session is online. This replay
+adapter does not change Maven 2 or 3.0's execution behavior.
+
 ```zsh
 nix shell 'github:nix-purifiers/maven-purifier'
 maven-purifier prefetch

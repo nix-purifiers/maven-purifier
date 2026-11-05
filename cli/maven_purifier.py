@@ -1238,6 +1238,7 @@ def prefetch(args):
         f"export JAVA_HOME={shlex.quote(str(jdk))}\n"
         f"exec {shlex.quote(str(prefetched / 'maven' / 'bin' / 'mvn'))} "
         f"-Dmaven.ext.class.path={shlex.quote(os.environ['MAVEN_PURIFIER_EXTENSION'])} "
+        "-Dmaven-purifier.replay=true "
         f"-o --settings {shlex.quote(str(state / 'settings.xml'))} \"$@\"\n"
     )
     launcher.chmod(0o755)
@@ -1248,6 +1249,7 @@ def prefetch(args):
             f"--settings={state / 'settings.xml'}",
             f"-Dmaven.ext.class.path={os.environ['MAVEN_PURIFIER_EXTENSION']}",
             f"-Dmaven-purifier.maven={lock_data['maven']['version']}",
+            "-Dmaven-purifier.replay=true",
             *MAVEN_FLAGS,
         ],
     )
