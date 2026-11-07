@@ -17,7 +17,9 @@ root = Path(__file__).resolve().parents[2]
 cli = str(args.cli.resolve())
 env = dict(os.environ, JAVA_HOME=str(args.jdk.resolve()))
 snapshot = json.loads(subprocess.check_output(['nix', 'flake', 'archive', '--json',
-    '--no-write-lock-file', str(root)], text=True))['path']
+    '--no-update-lock-file', str(root)], text=True))['path']
+snapshot = str(Path(snapshot).resolve(strict=True))
+assert Path(snapshot).is_dir(), f"Archived source is not a directory: {snapshot}"
 with tempfile.TemporaryDirectory(prefix="maven-compatibility-") as tmp:
     subprocess.run(['nix-store', '--add-root', str(Path(tmp)/'source'), '--realise', snapshot], check=True)
     project = Path(tmp) / "project"
