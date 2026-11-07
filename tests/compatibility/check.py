@@ -16,7 +16,7 @@ args = parser.parse_args()
 root = Path(__file__).resolve().parents[2]
 cli = str(args.cli.resolve())
 env = dict(os.environ, JAVA_HOME=str(args.jdk.resolve()))
-snapshot = json.loads(subprocess.check_output(['nix', 'flake', 'metadata', '--json',
+snapshot = json.loads(subprocess.check_output(['nix', 'flake', 'archive', '--json',
     '--no-write-lock-file', str(root)], text=True))['path']
 with tempfile.TemporaryDirectory(prefix="maven-compatibility-") as tmp:
     subprocess.run(['nix-store', '--add-root', str(Path(tmp)/'source'), '--realise', snapshot], check=True)
