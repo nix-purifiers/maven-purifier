@@ -17,7 +17,7 @@ root = Path(__file__).resolve().parents[2]
 cli = str(args.cli.resolve())
 env = dict(os.environ, JAVA_HOME=str(args.jdk.resolve()))
 snapshot = json.loads(subprocess.check_output(['nix', 'flake', 'metadata', '--json',
-    '--no-write-lock-file', 'path:'+str(root)], text=True))['path']
+    '--no-write-lock-file', str(root)], text=True))['path']
 with tempfile.TemporaryDirectory(prefix="maven-compatibility-") as tmp:
     subprocess.run(['nix-store', '--add-root', str(Path(tmp)/'source'), '--realise', snapshot], check=True)
     project = Path(tmp) / "project"
@@ -30,7 +30,27 @@ with tempfile.TemporaryDirectory(prefix="maven-compatibility-") as tmp:
     )
 
     def run(*command, extra_env=None):
-        subprocess.run(command, cwd=project, env=env | (extra_env or {}), check=True)
+        capture = command[:2] == ("nix", "build") and "MAVEN_PURIFIER_EVIDENCE_DIR" in env
+        result = subprocess.run(command, cwd=project, env=env | (extra_env or {}), check=True,
+                                text=True, stdout=subprocess.PIPE if capture else None)
+        if capture:
+            print(result.stdout, end="", flush=True)
+            builds = json.loads(result.stdout)
+            outputs = [output for build in builds for output in build['outputs'].values()]
+            directory = Path(env['MAVEN_PURIFIER_EVIDENCE_DIR'])
+            directory.mkdir(parents=True, exist_ok=True)
+            receipt = {
+                'sourcePath': snapshot,
+                'mavenVersion': args.version,
+                'javaHome': str(args.jdk.resolve()),
+                'command': list(command),
+                'builds': builds,
+                'outputs': json.loads(subprocess.check_output(['nix', 'path-info', '--json', *outputs])),
+                'derivations': json.loads(subprocess.check_output(
+                    ['nix', 'derivation', 'show', *[build['drvPath'] for build in builds]])),
+            }
+            (directory / f'build-{len(list(directory.glob("build-*.json")))}.json').write_text(
+                json.dumps(receipt, indent=2) + '\n')
 
     run(cli, "lock")
     lockfile = project / "maven-purifier.lock.json"
