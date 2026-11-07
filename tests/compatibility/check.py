@@ -39,8 +39,23 @@ with tempfile.TemporaryDirectory(prefix="maven-compatibility-") as tmp:
             outputs = [output for build in builds for output in build['outputs'].values()]
             directory = Path(env['MAVEN_PURIFIER_EVIDENCE_DIR'])
             directory.mkdir(parents=True, exist_ok=True)
+            index = len(list(directory.glob('build-*.json')))
+            captured_project = directory / f'project-{index}'
+            shutil.copytree(project, captured_project,
+                            ignore=shutil.ignore_patterns('target', '.maven-purifier', '.git'))
+            config = captured_project / '.mvn/maven.config'
+            if config.is_file():
+                # Remove prefetch's machine-local activation, as the builder does.
+                config.write_text(config.read_text().split('-Dmaven-purifier.prefetched=true')[0])
+                if not config.read_text().strip():
+                    config.unlink()
             receipt = {
                 'sourcePath': snapshot,
+                'sourceRevision': subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip(),
+                'sourceIdentity': json.loads(subprocess.check_output(['nix', 'path-info', '--json', snapshot])),
+                'projectSnapshot': captured_project.name,
+                'boundEnvironment': extra_env or {},
+                'replayEnvironment': dict(extra_env or {}, COMPAT_PROJECT=captured_project.name),
                 'mavenVersion': args.version,
                 'javaHome': str(args.jdk.resolve()),
                 'command': list(command),
@@ -49,7 +64,7 @@ with tempfile.TemporaryDirectory(prefix="maven-compatibility-") as tmp:
                 'derivations': json.loads(subprocess.check_output(
                     ['nix', 'derivation', 'show', *[build['drvPath'] for build in builds]])),
             }
-            (directory / f'build-{len(list(directory.glob("build-*.json")))}.json').write_text(
+            (directory / f'build-{index}.json').write_text(
                 json.dumps(receipt, indent=2) + '\n')
 
     run(cli, "lock")
