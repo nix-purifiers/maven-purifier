@@ -28,6 +28,35 @@ jobs:
         run: bash tests/native-platform.sh
       - name: Run the flake checks
         run: nix flake check --print-build-logs
+      - name: Record successful Gson runtime derivations
+        run: |
+          system=$(nix eval --impure --raw --expr builtins.currentSystem)
+          mkdir -p "$RUNNER_TEMP/gson-evidence"
+          git rev-parse HEAD > "$RUNNER_TEMP/gson-evidence/source.txt"
+          nix build --no-link --json \
+            ".#checks.$system.real-world-gson-tests" \
+            ".#checks.$system.real-world-gson-offline" > "$RUNNER_TEMP/gson-evidence/builds.json"
+          python3 - "$RUNNER_TEMP/gson-evidence" <<'PYTHON'
+          import json, pathlib, subprocess, sys
+          root = pathlib.Path(sys.argv[1])
+          builds = json.loads((root / 'builds.json').read_text())
+          outputs = [output for build in builds for output in build['outputs'].values()]
+          (root / 'outputs.json').write_bytes(subprocess.check_output(['nix', 'path-info', '--json', *outputs]))
+          (root / 'derivations.json').write_bytes(subprocess.check_output(
+              ['nix', 'derivation', 'show', *[build['drvPath'] for build in builds]]))
+          (root / 'system.txt').write_bytes(subprocess.check_output(
+              ['nix', 'eval', '--impure', '--raw', '--expr', 'builtins.currentSystem']))
+          (root / 'checks.json').write_text(json.dumps(['real-world-gson-tests', 'real-world-gson-offline']))
+          for output in outputs:
+              for name in ['toolchain.txt', 'tests.txt', 'missing-artifact.log']:
+                  path = pathlib.Path(output) / name
+                  if path.is_file():
+                      (root / name).write_bytes(path.read_bytes())
+          PYTHON
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gson-evidence-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/gson-evidence
 
   conformance-relock:
     strategy:
@@ -185,6 +214,14 @@ jobs:
           nix build '.#cli' --out-link "$RUNNER_TEMP/cli"
           nix build --inputs-from . 'nixpkgs#jdk${{ matrix.java }}_headless' --out-link "$RUNNER_TEMP/jdk"
       - name: Lock, relock, work offline and build in the sandbox
+        env:
+          MAVEN_PURIFIER_EVIDENCE_DIR: ${{ runner.temp }}/compatibility-evidence
         run: >-
           python3 tests/compatibility/check.py '${{ matrix.maven }}'
           "$RUNNER_TEMP/cli/bin/maven-purifier" "$RUNNER_TEMP/jdk"
+      - name: Bind the runtime receipts to the source revision
+        run: git rev-parse HEAD > "$RUNNER_TEMP/compatibility-evidence/source.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: maven-${{ matrix.maven }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/compatibility-evidence
