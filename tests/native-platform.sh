@@ -12,3 +12,6 @@ esac
 actual=$(nix eval --impure --raw --expr builtins.currentSystem)
 echo "Native Nix system: $actual"
 test "$actual" = "$expected"
+sandbox=$(nix config show sandbox)
+echo "Nix sandbox: $sandbox"
+test "$sandbox" = true

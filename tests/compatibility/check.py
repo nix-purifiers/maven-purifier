@@ -49,7 +49,10 @@ with tempfile.TemporaryDirectory(prefix="maven-compatibility-") as tmp:
                 config.write_text(config.read_text().split('-Dmaven-purifier.prefetched=true')[0])
                 if not config.read_text().strip():
                     config.unlink()
+            sandbox = subprocess.check_output(['nix', 'config', 'show', 'sandbox'], text=True).strip()
+            assert sandbox == 'true', f'Expected sandbox=true, got {sandbox}'
             receipt = {
+                'sandbox': sandbox,
                 'sourcePath': snapshot,
                 'sourceRevision': subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip(),
                 'sourceIdentity': json.loads(subprocess.check_output(['nix', 'path-info', '--json', snapshot])),
