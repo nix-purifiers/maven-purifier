@@ -24,6 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          extra_nix_config: |
+            sandbox = true
       - name: Record and verify the native runtime platform
         run: bash tests/native-platform.sh
       - name: Run the flake checks
@@ -47,6 +50,9 @@ jobs:
           (root / 'system.txt').write_bytes(subprocess.check_output(
               ['nix', 'eval', '--impure', '--raw', '--expr', 'builtins.currentSystem']))
           (root / 'checks.json').write_text(json.dumps(['real-world-gson-tests', 'real-world-gson-offline']))
+          sandbox = subprocess.check_output(['nix', 'config', 'show', 'sandbox'], text=True).strip()
+          assert sandbox == 'true', f'Expected sandbox=true, got {sandbox}'
+          (root / 'sandbox.txt').write_text(sandbox + '\n')
           for output in outputs:
               for name in ['toolchain.txt', 'tests.txt', 'missing-artifact.log']:
                   path = pathlib.Path(output) / name
@@ -67,6 +73,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          extra_nix_config: |
+            sandbox = true
       - name: Record and verify the native runtime platform
         run: bash tests/native-platform.sh
       - name: Build the command
@@ -115,6 +124,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          extra_nix_config: |
+            sandbox = true
       - name: Record and verify the native runtime platform
         run: bash tests/native-platform.sh
       - name: Build the command
@@ -144,6 +156,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          extra_nix_config: |
+            sandbox = true
       - name: Record and verify the native runtime platform
         run: bash tests/native-platform.sh
       - name: Build the command, jdtls and Python
@@ -207,6 +222,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          extra_nix_config: |
+            sandbox = true
       - name: Record and verify the native runtime platform
         run: bash tests/native-platform.sh
       - name: Build the purifier and the matching JDK
