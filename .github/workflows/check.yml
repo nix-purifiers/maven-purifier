@@ -225,3 +225,4 @@ jobs:
         with:
           name: maven-${{ matrix.maven }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/compatibility-evidence
+          include-hidden-files: true
