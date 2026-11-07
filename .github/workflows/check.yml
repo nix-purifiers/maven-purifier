@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 #
-# Runs the flake checks on x86_64-linux and aarch64-linux, and the two
+# Runs the flake checks on Linux and Darwin, and the two
 # conformance checks of the purifier contract that need the network or a
 # Nix installation, which the Nix sandbox has neither of: a relock of a
 # fixture, and the offline loop after a real `maven-purifier prefetch`.
@@ -19,11 +19,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-15]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - name: Record and verify the native runtime platform
+        run: bash tests/native-platform.sh
       - name: Run the flake checks
         run: nix flake check --print-build-logs
 
@@ -31,11 +33,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-15]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - name: Record and verify the native runtime platform
+        run: bash tests/native-platform.sh
       - name: Build the command
         run: nix build --out-link "$RUNNER_TEMP/cli" '.#cli'
       - name: Relock copies of fixtures, which must reproduce their lockfiles byte for byte
@@ -48,19 +52,42 @@ jobs:
           cp -r tests/fixtures/external "$RUNNER_TEMP/external"
           (cd "$RUNNER_TEMP/external/src" && HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/cli/bin/maven-purifier" lock --force --lockfile ../maven-purifier.lock.json)
           diff -u tests/fixtures/external/maven-purifier.lock.json "$RUNNER_TEMP/external/maven-purifier.lock.json"
-      - name: Relock Gson, which must reproduce its committed lockfile byte for byte
+      - name: Lock, relock, prefetch and test Gson with ordinary Maven
         run: |
           git clone --quiet https://github.com/google/gson "$RUNNER_TEMP/gson"
           git -C "$RUNNER_TEMP/gson" checkout --quiet fcd416909db2bea96eb916bcfb2d0a83cb9b86c3
           cp tests/real-world/gson/maven-purifier.lock.json "$RUNNER_TEMP/gson.lock.json"
           (cd "$RUNNER_TEMP/gson" && HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/cli/bin/maven-purifier" lock --force --lockfile ../gson.lock.json)
           diff -u tests/real-world/gson/maven-purifier.lock.json "$RUNNER_TEMP/gson.lock.json"
+          cd "$RUNNER_TEMP/gson"
+          HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/cli/bin/maven-purifier" lock --force --lockfile ../gson.lock.json
+          diff -u "$GITHUB_WORKSPACE/tests/real-world/gson/maven-purifier.lock.json" "$RUNNER_TEMP/gson.lock.json"
+          HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/cli/bin/maven-purifier" prefetch --lockfile ../gson.lock.json
+          export JAVA_HOME="$PWD/.maven-purifier/jdk"
+          export PATH="$PWD/.maven-purifier/bin:$PATH"
+          mvn --version
+          HOME="$RUNNER_TEMP/home" mvn -B -ntp clean install
+          python3 "$GITHUB_WORKSPACE/tests/real-world/gson/check-reports.py" .
+          # Maven must fail rather than fall back to a remote repository.
+          junit=.maven-purifier/repository/junit/junit/4.13.2/junit-4.13.2.jar
+          test -f "$junit"
+          mv "$junit" "$RUNNER_TEMP/withheld-junit.jar"
+          if HOME="$RUNNER_TEMP/home" mvn -B -ntp -pl gson test > "$RUNNER_TEMP/missing-artifact.log" 2>&1; then
+            echo 'Maven accepted a missing locked test dependency' >&2
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/missing-artifact.log"
+          grep -i 'offline' "$RUNNER_TEMP/missing-artifact.log"
+          grep 'junit:junit' "$RUNNER_TEMP/missing-artifact.log"
+          mv "$RUNNER_TEMP/withheld-junit.jar" "$junit"
 
   conformance-update:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - name: Record and verify the native runtime platform
+        run: bash tests/native-platform.sh
       - name: Build the command
         run: nix build --out-link "$RUNNER_TEMP/cli" '.#cli'
       - name: Update a copy of the multi fixture to a newer commons-lang3
@@ -88,6 +115,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - name: Record and verify the native runtime platform
+        run: bash tests/native-platform.sh
       - name: Build the command, jdtls and Python
         run: |
           nix build --out-link "$RUNNER_TEMP/cli" '.#cli'
@@ -140,10 +169,17 @@ jobs:
           - { maven: '3.8.8', java: '17' }
           - { maven: '3.9.11', java: '17' }
           - { maven: '4.0.0-rc-7', java: '17' }
-    runs-on: ubuntu-latest
+          - { maven: '3.9.16', java: '17' }
+          - { maven: '3.10.0', java: '17' }
+          - { maven: '3.9.16', java: '17', runner: macos-15 }
+          - { maven: '3.10.0', java: '17', runner: macos-15 }
+          - { maven: '4.0.0-rc-7', java: '17', runner: macos-15 }
+    runs-on: ${{ matrix.runner || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - name: Record and verify the native runtime platform
+        run: bash tests/native-platform.sh
       - name: Build the purifier and the matching JDK
         run: |
           nix build '.#cli' --out-link "$RUNNER_TEMP/cli"

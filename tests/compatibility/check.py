@@ -56,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix="maven-compatibility-") as tmp:
         src = /. + builtins.getEnv "COMPAT_PROJECT";
       }).tests
     """
-    run("nix", "build", "--impure", "--no-link", "--print-build-logs", "--expr", expression,
+    run("nix", "build", "--impure", "--no-link", "--json", "--print-build-logs", "--expr", expression,
         extra_env={"COMPAT_FLAKE": snapshot, "COMPAT_PROJECT": str(project)})
 
     if args.version.startswith('2.'):
@@ -65,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix="maven-compatibility-") as tmp:
         composed = expression.replace('src = /. + builtins.getEnv "COMPAT_PROJECT";',
             'src = /. + builtins.getEnv "COMPAT_PROJECT"; '
             'projectDependencies = [ f.checks.${builtins.currentSystem}.composition.producer ];')
-        run('nix', 'build', '--impure', '--no-link', '--print-build-logs', '--expr', composed,
+        run('nix', 'build', '--impure', '--no-link', '--json', '--print-build-logs', '--expr', composed,
             extra_env={'COMPAT_FLAKE': snapshot, 'COMPAT_PROJECT': str(project)})
 
     if not args.version.startswith('2.'):
@@ -103,5 +103,5 @@ with tempfile.TemporaryDirectory(prefix="maven-compatibility-") as tmp:
             find ${built.projections.maven}/org/apache/commons/commons-text -name '*-nix-*.pom' | grep -q .
             touch $out
           '' ''')
-        run('nix', 'build', '--impure', '--no-link', '--print-build-logs', '--expr', runtime_expression,
+        run('nix', 'build', '--impure', '--no-link', '--json', '--print-build-logs', '--expr', runtime_expression,
             extra_env={'COMPAT_FLAKE': snapshot, 'COMPAT_PROJECT': str(project)})
