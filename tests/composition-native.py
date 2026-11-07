@@ -19,8 +19,10 @@ args = parser.parse_args()
 cli = args.cli.resolve()
 root = Path(__file__).resolve().parents[1]
 system = subprocess.check_output(['nix', 'eval', '--impure', '--raw', '--expr', 'builtins.currentSystem'], text=True)
-snapshot = json.loads(subprocess.check_output(['nix', 'flake', 'metadata', '--json',
-    '--no-write-lock-file', 'path:'+str(root)], text=True))['path']
+snapshot = json.loads(subprocess.check_output(['nix', 'flake', 'archive', '--json',
+    '--no-update-lock-file', str(root)], text=True))['path']
+snapshot = str(Path(snapshot).resolve(strict=True))
+assert Path(snapshot).is_dir(), f"Archived source is not a directory: {snapshot}"
 with tempfile.TemporaryDirectory(prefix='maven-project-input-') as temporary:
     subprocess.run(['nix-store', '--add-root', str(Path(temporary)/'source'), '--realise', snapshot], check=True)
     reference = args.gradle_producer or ('path:' + snapshot + '#checks.' + system + '.composition.producer')
