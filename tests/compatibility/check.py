@@ -58,6 +58,7 @@ with tempfile.TemporaryDirectory(prefix="maven-compatibility-") as tmp:
                 'replayEnvironment': dict(extra_env or {}, COMPAT_PROJECT=captured_project.name),
                 'mavenVersion': args.version,
                 'javaHome': str(args.jdk.resolve()),
+                'javaIdentity': json.loads(subprocess.check_output(['nix', 'path-info', '--json', str(args.jdk.resolve())])),
                 'command': list(command),
                 'builds': builds,
                 'outputs': json.loads(subprocess.check_output(['nix', 'path-info', '--json', *outputs])),
