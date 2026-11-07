@@ -288,15 +288,45 @@ let
   # library, its extras, a protobuf module that runs a protoc of each
   # system, and tests of JPMS and code shrinking. Its source comes from
   # GitHub unchanged, and its lockfile lies here, outside it.
+  gsonSource = pkgs.fetchFromGitHub {
+    owner = "google";
+    repo = "gson";
+    rev = "fcd416909db2bea96eb916bcfb2d0a83cb9b86c3";
+    hash = "sha256-Z6Ciixpi415JzF96ZACH9YR2Aq15uS/oPz1TxhQGRUQ=";
+  };
   gson = build {
-    src = pkgs.fetchFromGitHub {
-      owner = "google";
-      repo = "gson";
-      rev = "fcd416909db2bea96eb916bcfb2d0a83cb9b86c3";
-      hash = "sha256-Z6Ciixpi415JzF96ZACH9YR2Aq15uS/oPz1TxhQGRUQ=";
-    };
+    src = gsonSource;
     lockFile = ./real-world/gson/maven-purifier.lock.json;
   };
+
+  # Execute the ordinary Maven workflow in a networkless derivation too.
+  # The networked capture/relock job prepares the same committed lock.
+  gsonOffline = pkgs.runCommand "maven-purifier-gson-offline"
+    { nativeBuildInputs = [ pkgs.python3 ]; }
+    ''
+      export HOME=$TMPDIR/home
+      mkdir -p "$HOME" "$out"
+      cp -r ${gsonSource} $TMPDIR/gson
+      chmod -R u+w $TMPDIR/gson
+      cd $TMPDIR/gson
+      ${cli}/bin/maven-purifier prefetch \
+        --lockfile ${./real-world/gson/maven-purifier.lock.json} \
+        --prefetched ${gson.prefetch}
+      export JAVA_HOME=$PWD/.maven-purifier/jdk
+      export PATH=$PWD/.maven-purifier/bin:$PATH
+      mvn --version > "$out/toolchain.txt"
+      mvn -B -ntp clean install > "$out/maven.log" 2>&1
+      python3 ${./real-world/gson/check-reports.py} . | tee "$out/tests.txt"
+      junit=.maven-purifier/repository/junit/junit/4.13.2/junit-4.13.2.jar
+      test -f "$junit"
+      mv "$junit" $TMPDIR/withheld-junit.jar
+      if mvn -B -ntp -pl gson test > "$out/missing-artifact.log" 2>&1; then
+        echo 'Maven accepted a missing locked test dependency' >&2
+        exit 1
+      fi
+      grep -i 'offline' "$out/missing-artifact.log"
+      grep 'junit:junit' "$out/missing-artifact.log"
+    '';
 
   # The unit tests of the lock tool: settings, tracking files, mirrors,
   # paths, the lockfile and definition hashes, declared downloads and the
@@ -420,6 +450,7 @@ in
   real-world-gson = gson.packages.gson;
   real-world-gson-proto = gson.packages.proto;
   real-world-gson-tests = gson.tests;
+  real-world-gson-offline = gsonOffline;
   conformance-stale = conformanceStale;
   conformance-tampered = conformanceTampered;
   conformance-missing = conformanceMissing;
