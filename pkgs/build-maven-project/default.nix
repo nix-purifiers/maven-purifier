@@ -233,6 +233,9 @@ let
   # repository. The jars get a fixed timestamp, so that a rebuild gives the
   # same bytes.
   runMaven = flags: ''
+    # Java's Unix pathname encoding follows the process locale, independently
+    # of file.encoding. The libc-provided UTF-8 C locale needs no locale archive.
+    ${lib.optionalString stdenvNoCC.hostPlatform.isLinux "export LC_ALL=C.UTF-8"}
     export HOME="$TMPDIR/home"
     export JAVA_HOME=${jdk'.home}
     mkdir -p "$HOME"
