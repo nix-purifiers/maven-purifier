@@ -25,7 +25,7 @@ let
     ".idea"
     "node_modules"
   ];
-  skippedDir = name: builtins.elem name skipped || builtins.substring 0 6 name == "result";
+  skippedDir = name: builtins.elem name skipped;
 
   # The definition files under `dir`, as paths relative to the build root.
   # `rel` is the relative path of `dir`, "" at the root; `inMvn` says whether

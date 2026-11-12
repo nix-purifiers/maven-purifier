@@ -107,7 +107,7 @@ let
       || name == ".maven-purifier-pom.xml"
       || name == ".git"
       || name == ".idea"
-      || lib.hasPrefix "result" name
+      || (type == "symlink" && dirOf path == toString src && lib.hasPrefix "result" name)
     );
 
   filteredSrc = builtins.path {

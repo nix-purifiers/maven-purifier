@@ -272,13 +272,13 @@ def definition_files(root):
     """The files that define the build, as relative path strings in sorted order.
 
     They are every regular file named pom.xml, and every regular file under
-    .mvn/ at the build root. Directories in SKIPPED_DIRS, directories whose
-    names start with "result", and symbolic links take no part.
+    .mvn/ at the build root. Directories in SKIPPED_DIRS and symbolic links
+    take no part.
     lib-overlays/default/definition-hash.nix walks the build root by the same rules.
     """
     files = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIPPED_DIRS and not d.startswith("result")]
+        dirnames[:] = [d for d in dirnames if d not in SKIPPED_DIRS]
         rel = Path(dirpath).relative_to(root)
         for name in filenames:
             path = Path(dirpath) / name
@@ -658,8 +658,12 @@ def offline_settings(lock_data, repo, path):
 def copy_build(root, dest):
     """Copies the build root for a lock run, without build outputs and without the lines of `prefetch`."""
 
-    def ignore(_dir, names):
-        return [n for n in names if n in SKIPPED_DIRS or n.startswith("result")]
+    # Nix's default output links live at the build root. Ordinary source
+    # directories such as org.junit.experimental.results must be retained.
+    def ignore(directory, names):
+        return [n for n in names if n in SKIPPED_DIRS or (
+            Path(directory) == Path(root) and n.startswith("result") and (Path(directory) / n).is_symlink()
+        )]
 
     shutil.copytree(root, dest, symlinks=True, ignore=ignore)
     config = dest / ".mvn" / "maven.config"
