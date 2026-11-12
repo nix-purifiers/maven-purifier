@@ -509,6 +509,38 @@ def local_name(tag):
     return tag.rsplit("}", 1)[-1]
 
 
+def generated_obr_index(path, repo, installed):
+    """Recognize Felix's local OBR index of this reactor's installed bundles.
+
+    The bundle plugin writes repository.xml itself during install, outside
+    Resolver events. It is regenerated during replay, not an input download.
+    Do not exempt arbitrary files or indexes of unrecorded external bundles.
+    """
+    if path != repo / "repository.xml":
+        return False
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError):
+        return False
+    resources = list(root)
+    if local_name(root.tag) != "repository" or not resources:
+        return False
+    for resource in resources:
+        if local_name(resource.tag) != "resource":
+            return False
+        uri = urllib.parse.urlparse(resource.get("uri", ""))
+        if uri.scheme not in ("", "file") or uri.netloc or uri.query or uri.fragment or not uri.path:
+            return False
+        target = (repo / urllib.parse.unquote(uri.path)).resolve()
+        try:
+            relative = target.relative_to(repo.resolve()).as_posix()
+        except ValueError:
+            return False
+        if relative not in installed or not target.is_file():
+            return False
+    return True
+
+
 def qualifier(element):
     """A function that names a child of element in the namespace of element."""
     namespace = element.tag[1:].split("}")[0] if element.tag.startswith("{") else ""
@@ -1023,6 +1055,8 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
             if rel.startswith(LEGACY_RECORDER_PATH) or rel in downloads or rel in installed or rel in declared_paths or rel in seeded or rel in provided_paths:
                 continue
             if path.name.startswith("maven-metadata") and Path(rel).parent.as_posix() in module_dirs:
+                continue
+            if generated_obr_index(path, repo, installed):
                 continue
             _, dot, suffix = rel.rpartition(".")
             if dot and f".{suffix}" in CHECKSUM_SUFFIXES:
