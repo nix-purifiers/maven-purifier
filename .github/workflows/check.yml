@@ -109,7 +109,6 @@ jobs:
           HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/cli/bin/maven-purifier" lock --force --lockfile ../gson.lock.json
           diff -u "$GITHUB_WORKSPACE/tests/real-world/gson/maven-purifier.lock.json" "$RUNNER_TEMP/gson.lock.json"
           HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/cli/bin/maven-purifier" prefetch --lockfile ../gson.lock.json
-          export JAVA_HOME="$PWD/.maven-purifier/jdk"
           export PATH="$PWD/.maven-purifier/bin:$PATH"
           mvn --version
           HOME="$RUNNER_TEMP/home" mvn -B -ntp clean install
@@ -198,7 +197,7 @@ jobs:
           # network, and the steps run as the runner's own user.
           offline() {
             sudo unshare --net -- sudo -u "$USER" env HOME="$HOME" PATH="$PATH" \
-              JAVA_HOME="$PWD/.maven-purifier/jdk" "$@"
+              JAVA_HOME="$JAVA_HOME" "$@"
           }
           offline .maven-purifier/bin/mvn -B -ntp clean install
           offline "$RUNNER_TEMP/python/bin/python3" "$GITHUB_WORKSPACE/tests/ide/jdtls_check.py" \
