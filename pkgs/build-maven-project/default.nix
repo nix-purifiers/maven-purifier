@@ -215,6 +215,7 @@ let
       exit 1
     }
     ${maven}/bin/mvn -o -B \
+      -Dmaven-purifier.root="$PWD" \
       ${lib.optionalString (lib.versionAtLeast lock.version "3.1") "-Dmaven.ext.class.path=${extension}/share/java/maven-purifier-extension.jar -Dmaven-purifier.replay=true"} \
       -s ${settings} \
       -Dmaven.repo.local="$TMPDIR/repository" \

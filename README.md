@@ -341,6 +341,11 @@ Each source of dependencies reaches the lock as follows.
   lock run read.
 - **SNAPSHOT dependencies.** The lockfile holds the timestamped files the
   lock run resolved, under both names Maven Resolver stores them under.
+- **Javadoc link metadata** is observed from the native doclet invocations.
+  The lock snapshots the package and element lists, including platform links
+  observed in generated HTML. Replay supplies them through native `offlineLinks`,
+  preserving public documentation URLs without editing the source POM. A relock
+  keeps these snapshots; `maven-purifier update` refreshes them.
 - **Files a plugin downloads itself**, outside Maven Resolver, such as the
   Node.js of frontend-maven-plugin. Maven reports nothing about them, so the
   build declares each with its URL and its path in the local repository, in

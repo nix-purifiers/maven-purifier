@@ -70,6 +70,7 @@ stdenvNoCC.mkDerivation {
       exit 1
     fi
     install -Dm644 cli/maven_purifier.py $out/libexec/maven-purifier/maven_purifier.py
+    install -Dm644 cli/javadoc_resources.py $out/libexec/maven-purifier/javadoc_resources.py
     makeWrapper ${python3.interpreter} $out/bin/maven-purifier \
       --add-flags $out/libexec/maven-purifier/maven_purifier.py \
       --prefix PYTHONPATH : ${purifier.projectInputsTool} \

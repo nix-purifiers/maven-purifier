@@ -87,6 +87,29 @@ public class RecordingEventSpy extends AbstractEventSpy {
       guard(event);
       return;
     }
+    if (event instanceof org.apache.maven.execution.ExecutionEvent) {
+      org.apache.maven.execution.ExecutionEvent execution = (org.apache.maven.execution.ExecutionEvent) event;
+      if (execution.getType() == org.apache.maven.execution.ExecutionEvent.Type.MojoSucceeded
+          && execution.getMojoExecution() != null
+          && "org.apache.maven.plugins".equals(execution.getMojoExecution().getGroupId())
+          && "maven-javadoc-plugin".equals(execution.getMojoExecution().getArtifactId())) {
+        try {
+          java.io.File stale = new java.io.File(execution.getProject().getBuild().getDirectory(),
+              "maven-javadoc-plugin-stale-data.txt");
+          org.codehaus.plexus.util.xml.Xpp3Dom config = execution.getMojoExecution().getConfiguration();
+          if (config != null && config.getChild("staleDataPath") != null) {
+            Object value = new org.apache.maven.plugin.PluginParameterExpressionEvaluator(
+                execution.getSession(), execution.getMojoExecution()).evaluate(config.getChild("staleDataPath").getValue());
+            if (value != null) stale = value instanceof java.io.File ? (java.io.File) value : new java.io.File(value.toString());
+          }
+          DocumentationCapture.write(out, execution.getProject(), execution.getMojoExecution().getExecutionId(), stale);
+        } catch (Exception error) {
+          out.write("{\"event\":\"javadoc-error\",\"message\":" + DocumentationCapture.json(error.toString()) + "}\n");
+          out.flush();
+        }
+      }
+      return;
+    }
     if (!(event instanceof RepositoryEvent)) {
       return;
     }

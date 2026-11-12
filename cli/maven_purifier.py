@@ -63,6 +63,7 @@ import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
 import zipfile
+import javadoc_resources
 from pathlib import Path
 from typing import NoReturn
 
@@ -794,7 +795,7 @@ def run_maven(mvn, project, env, settings, repo, goals):
     legacy = maven_version_tuple(mvn) < (3, 1, 0)
     if legacy:
         seed_legacy_recorder(repo)
-    command = [str(mvn), "-B", "-s", str(settings), f"-Dmaven.repo.local={repo}"]
+    command = [str(mvn), "-B", "-s", str(settings), f"-Dmaven.repo.local={repo}", f"-Dmaven-purifier.root={project}"]
     if maven_version_tuple(mvn) >= (3, 0, 0):
         command.append(f"-Dmaven.ext.class.path={os.environ['MAVEN_PURIFIER_EXTENSION']}")
     command += [*MAVEN_FLAGS, *goals]
@@ -959,6 +960,7 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
             (state / "project-inputs.properties").write_text("".join(lines))
         declared_paths = {d["path"] for d in declared}
         seeded = seed_metadata(repo, previous, refresh)
+        seeded.update(javadoc_resources.seed(previous, repo, refresh == "all"))
         (tmp / "home").mkdir()
         write_run_settings(settings, tmp / "settings.xml", legacy=maven_version_tuple(mvn) < (3, 1, 0))
         record = tmp / "record.jsonl"
@@ -987,6 +989,10 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
         if run_maven(mvn, project, env, tmp / "settings.xml", repo, goals) != 0:
             fail(f"the lock run failed; {lock_path} is unchanged")
         build_events = len(read_record(record)) if record.exists() else 0
+        try:
+            documentation = javadoc_resources.capture(read_record(record)[:build_events], repo, previous, refresh == "all")
+        except (OSError, ValueError) as error:
+            fail(f"cannot lock Javadoc metadata: {error}; {lock_path} is unchanged")
 
         # The development pass: the plugins of the build and the source jars
         # of its dependencies, with the locked Maven, and the default plugins
@@ -1088,7 +1094,7 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
         # serves new contents whenever a version is published, so a fetch
         # pinned by hash would break. The lock holds the contents the
         # resolver read. Every other download is immutable.
-        entries: list[dict] = [file_entry(dist_path, url, dist_hash), *declared]
+        entries: list[dict] = [file_entry(dist_path, url, dist_hash), *declared, *documentation]
         if editor_dist is not None and editor_dist["path"] != dist_path:
             entries.append(dict(editor_dist, development=True))
         for rel, src in sorted(downloads.items()):
@@ -1293,6 +1299,7 @@ def prefetch(args):
         f"exec {shlex.quote(str(prefetched / 'maven' / 'bin' / 'mvn'))} "
         f"-Dmaven.ext.class.path={shlex.quote(os.environ['MAVEN_PURIFIER_EXTENSION'])} "
         "-Dmaven-purifier.replay=true "
+        f"-Dmaven-purifier.root={shlex.quote(str(root))} "
         f"-o --settings {shlex.quote(str(state / 'settings.xml'))} \"$@\"\n"
     )
     launcher.chmod(0o755)
@@ -1304,6 +1311,7 @@ def prefetch(args):
             f"-Dmaven.ext.class.path={os.environ['MAVEN_PURIFIER_EXTENSION']}",
             f"-Dmaven-purifier.maven={lock_data['maven']['version']}",
             "-Dmaven-purifier.replay=true",
+            f"-Dmaven-purifier.root={root}",
             *MAVEN_FLAGS,
         ],
     )
