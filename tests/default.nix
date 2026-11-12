@@ -511,6 +511,12 @@ in
   multi-app = multi.packages.app;
   multi-core = multi.packages.core;
   multi-tests = multi.tests;
+  unicode-paths = multi.tests.overrideAttrs (old: {
+    name = "maven-unicode-path-tests";
+    preBuild = (old.preBuild or "") + ''
+      cp ${./unicode-paths/UnicodePathTest.java} app/src/test/java/example/multi/app/UnicodePathTest.java
+    '';
+  });
   bundle-release = bundle.packages.bundle;
   jdk-toolchains = toolchainCheck;
   online-goal = pkgs.runCommand "maven-purifier-online-goal" { } ''
