@@ -1360,7 +1360,12 @@ def prefetch(args):
         f"Maven resolves offline from {repo} now. The locked Maven {lock_data['maven']['version']} is "
         f"{state / 'bin' / 'mvn'}. Local builds use your existing Java runtime; "
         f"the runtime found during prefetch is {host_java}. "
-        f"Its alias and the prefetch GC root are in {persistent}."
+        f"Its runtime alias is in {persistent}. "
+        + (
+            "The supplied prefetch remains rooted by its provider."
+            if "--prefetched" in options.values
+            else f"The prefetch GC root is {persistent / 'prefetch'}."
+        )
     )
 
 
