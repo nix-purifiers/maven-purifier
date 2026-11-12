@@ -370,9 +370,11 @@ let
         cp ${../extension/src/io/github/nixpurifiers/maven/DocumentationCapture.java} src/DocumentationCapture.java
         cp ${../extension/src/io/github/nixpurifiers/maven/DocumentationLinks.java} src/DocumentationLinks.java
         cp ${./extension/io/github/nixpurifiers/maven/LockedReplayParticipantTest.java} src/LockedReplayParticipantTest.java
+        cp ${./extension/io/github/nixpurifiers/maven/DocumentationLinksTest.java} src/DocumentationLinksTest.java
         javac -Xlint:-deprecation -d classes -cp "${pkgs.maven}/maven/lib/*" src/*.java
         java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.RecordingEventSpyTest
         java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.LockedReplayParticipantTest
+        java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.DocumentationLinksTest
         touch $out
       '';
 
