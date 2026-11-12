@@ -346,7 +346,7 @@ let
     pkgs.runCommand "maven-purifier-test-unit-cli"
       {
         nativeBuildInputs = [ pkgs.python3 ];
-        MAVEN_PURIFIER_CLI = ../cli/maven_purifier.py;
+        MAVEN_PURIFIER_CLI = "${../cli}/maven_purifier.py";
       }
       ''
         python3 ${./cli/test_maven_purifier.py}
@@ -367,6 +367,8 @@ let
         cp ${../extension/src/io/github/nixpurifiers/maven/RecordingEventSpy.java} src/RecordingEventSpy.java
         cp ${./extension/io/github/nixpurifiers/maven/RecordingEventSpyTest.java} src/RecordingEventSpyTest.java
         cp ${../extension/src/io/github/nixpurifiers/maven/LockedReplayParticipant.java} src/LockedReplayParticipant.java
+        cp ${../extension/src/io/github/nixpurifiers/maven/DocumentationCapture.java} src/DocumentationCapture.java
+        cp ${../extension/src/io/github/nixpurifiers/maven/DocumentationLinks.java} src/DocumentationLinks.java
         cp ${./extension/io/github/nixpurifiers/maven/LockedReplayParticipantTest.java} src/LockedReplayParticipantTest.java
         javac -Xlint:-deprecation -d classes -cp "${pkgs.maven}/maven/lib/*" src/*.java
         java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.RecordingEventSpyTest

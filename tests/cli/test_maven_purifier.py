@@ -9,12 +9,14 @@ Run with the module's path in MAVEN_PURIFIER_CLI:
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest import mock
 
+sys.path.insert(0, str(Path(os.environ["MAVEN_PURIFIER_CLI"]).parent))
 spec = importlib.util.spec_from_file_location("maven_purifier", os.environ["MAVEN_PURIFIER_CLI"])
 assert spec is not None and spec.loader is not None
 mp = importlib.util.module_from_spec(spec)
@@ -538,9 +540,6 @@ class Options(unittest.TestCase):
             self.assertEqual(mp.Options(["--lockfile", "/f/x.json"]).lock_path(Path("/b")), Path("/f/x.json"))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class Compatibility(TemporaryTree):
     def test_java_versions(self):
@@ -594,3 +593,72 @@ class Compatibility(TemporaryTree):
                 mp.record_legacy_downloads(self.root/"repository",record)
                 self.assertEqual(fetch.call_args.args[0], CENTRAL+"example/a/1/a-1.jar")
         self.assertEqual(mp.read_record(record)[-1]["event"],"download")
+
+
+class JavadocResourcesTests(TemporaryTree):
+    def event(self, options, project=".", execution="default-cli"):
+        return {"event": "javadoc", "project": project, "execution": execution, "options": options}
+
+    def test_only_executed_javadoc_contributes_snapshots(self):
+        with mock.patch.object(mp.javadoc_resources, "metadata") as fetch:
+            self.assertEqual(mp.javadoc_resources.capture([{"event": "install"}], self.root), [])
+            fetch.assert_not_called()
+
+    def test_legacy_package_list_survives_an_html_element_endpoint(self):
+        import io
+        responses = [io.BytesIO(b"<!DOCTYPE html><html>not found</html>"), io.BytesIO(b"example.api\n")]
+        with mock.patch.object(mp.javadoc_resources.urllib.request, "urlopen", side_effect=responses):
+            self.assertEqual(mp.javadoc_resources.metadata("https://docs.example/api"), [
+                ("package-list", "https://docs.example/api/package-list", "example.api\n")])
+
+    def test_snapshots_are_shared_but_execution_scopes_remain_separate(self):
+        events = [self.event("-link\n'https://docs.example/api/'", "a", "docs"),
+                  self.event("-link\n'https://docs.example/api'", "b", "test-docs")]
+        with mock.patch.object(mp.javadoc_resources, "metadata", return_value=[
+            ("element-list", "https://docs.example/api/element-list", "module:example\nexample.api\n")
+        ]) as fetch:
+            entries = mp.javadoc_resources.capture(events, self.root)
+        self.assertEqual(fetch.call_count, 1)
+        document = mp.javadoc_resources.index(entries)
+        self.assertEqual([(p.get("id"), p.find("execution").get("id")) for p in document],
+                         [("a", "docs"), ("b", "test-docs")])
+        self.assertEqual(len(entries), 2)
+
+    def test_relock_reuses_snapshots_without_network(self):
+        event = self.event("-link\n'https://docs.example/api'")
+        with mock.patch.object(mp.javadoc_resources, "metadata", return_value=[
+            ("package-list", "https://docs.example/api/package-list", "example.api\n")
+        ]):
+            original = mp.javadoc_resources.capture([event], self.root)
+        previous = {"downloads": original}
+        mp.javadoc_resources.seed(previous, self.root)
+        link = mp.javadoc_resources.index(original).find("project/execution/link")
+        replay = self.event("-linkoffline\n'https://docs.example/api' '" + str(self.root / link.get("directory")) + "'")
+        with mock.patch.object(mp.javadoc_resources, "metadata", side_effect=AssertionError("unexpected network")):
+            self.assertEqual(mp.javadoc_resources.capture([replay], self.root, previous), original)
+
+    def test_platform_url_comes_from_actual_doclet_output(self):
+        self.write("docs/api.html", '<a class="external-link" href="https://custom.example/sdk/api/java.base/java/lang/Object.html">Object</a>')
+        self.assertEqual(mp.javadoc_resources.platform_links(self.root / "docs"), {"https://custom.example/sdk/api"})
+        self.write("docs/api.html", '<a href="https://custom.example/sdk/api/java/lang/Object.html">ordinary manual link</a>')
+        self.assertEqual(mp.javadoc_resources.platform_links(self.root / "docs"), set())
+
+    def test_bundled_platform_metadata_is_not_fetched_again(self):
+        self.write("docs/api.html", '<a class="external-link" href="https://java.example/api/java/lang/Object.html">Object</a>')
+        event = self.event("-linkoffline\n'https://java.example/api' '/plugin/bundled-metadata'\n-d\n'" + str(self.root / "docs") + "'")
+        with mock.patch.object(mp.javadoc_resources, "metadata", side_effect=AssertionError("unexpected network")):
+            self.assertEqual(mp.javadoc_resources.capture([event], self.root), [])
+
+    def test_public_href_and_metadata_location_can_differ(self):
+        event = self.event("-linkoffline\n'https://public.example/api' 'https://cache.example/versioned'")
+        with mock.patch.object(mp.javadoc_resources, "metadata", return_value=[
+            ("package-list", "https://cache.example/versioned/package-list", "example.api\n")
+        ]):
+            entries = mp.javadoc_resources.capture([event], self.root)
+        link = mp.javadoc_resources.index(entries).find("project/execution/link")
+        self.assertEqual(link.get("url"), "https://public.example/api")
+        self.assertEqual(link.get("metadata"), "https://cache.example/versioned")
+
+
+if __name__ == "__main__":
+    unittest.main()
