@@ -274,7 +274,7 @@ let
         grep -qx -- '-Dmaven-purifier.prefetched=true' .mvn/maven.config
         export JAVA_HOME=$PWD/.maven-purifier/jdk
         .maven-purifier/bin/mvn -B -ntp clean install 2>&1 | tee $TMPDIR/mvn.log
-        grep -q 'Tests run: 1, Failures: 0' $TMPDIR/mvn.log
+        grep -q 'Tests run: 2, Failures: 0' $TMPDIR/mvn.log
         test -f app/target/app-1.0.0.jar
         touch $out
       '';

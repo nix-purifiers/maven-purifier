@@ -244,9 +244,16 @@ class DefinitionHash(TemporaryTree):
         before = mp.definition_hash(self.root, ["install"])
         self.write("target/pom.xml", "<generated/>")
         self.write("core/target/classes/pom.xml", "<generated/>")
-        self.write("result/pom.xml", "<generated/>")
+        (self.root / "result").symlink_to(self.root / "target", target_is_directory=True)
         self.write("core/src/Main.java", "class Main { int x; }")
         self.assertEqual(mp.definition_hash(self.root, ["install"]), before)
+
+    def test_results_module_is_part_of_the_definition(self):
+        before = mp.definition_hash(self.root, ["install"])
+        self.write("results/pom.xml", "<project><artifactId>results</artifactId></project>")
+        self.assertIn("results/pom.xml", mp.definition_files(self.root))
+        self.assertNotEqual(mp.definition_hash(self.root, ["install"]), before)
+
 
     def test_changes_with_definition_and_goals(self):
         before = mp.definition_hash(self.root, ["install"])
@@ -268,6 +275,27 @@ class DefinitionHash(TemporaryTree):
             f"pom.xml {h('<project/>')}\n"
         )
         self.assertEqual(mp.definition_hash(self.root, ["clean", "install"]), "sha256:" + h(text))
+
+
+class CopyBuild(TemporaryTree):
+    def test_keeps_result_sources_and_omits_root_nix_output_links(self):
+        self.write("pom.xml", "<project/>")
+        self.write("results/pom.xml", "<project/>")
+        self.write("src/main/java/example/results/Result.java", "package example.results; class Result {}")
+        self.write("result-data.txt", "source data")
+        self.write("src/main/resources/value", "resource")
+        (self.root / "src/main/resources/results").symlink_to("value")
+        self.write("target/pom.xml", "<generated/>")
+        (self.root / "result").symlink_to(self.root / "target", target_is_directory=True)
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "source"
+            mp.copy_build(self.root, destination)
+            self.assertTrue((destination / "results/pom.xml").is_file())
+            self.assertTrue((destination / "src/main/java/example/results/Result.java").is_file())
+            self.assertEqual((destination / "result-data.txt").read_text(), "source data")
+            self.assertEqual((destination / "src/main/resources/results").read_text(), "resource")
+            self.assertFalse((destination / "result").is_symlink())
+            self.assertFalse((destination / "target").exists())
 
 
 class DistributionUrl(TemporaryTree):
