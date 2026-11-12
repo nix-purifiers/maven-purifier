@@ -201,7 +201,9 @@ toolchain requirements; `version` is required. The JDK that runs Maven is
 selected by `jdk` as usual. Run capture with the project's native SDK setup,
 then configure the corresponding Nix JDKs for replay. The builder passes a
 standard toolchains XML file to Maven and includes those SDKs in its Nix
-closure.
+closure. Explicit toolchain forwarding requires native Maven 3 or newer,
+which supports `--toolchains`. Maven 2 builds with no `jdkToolchains`
+continue to use the existing core JDK path.
 
 To use that same SDK configuration in the developer launcher, expose
 `project.prefetch` as a flake package (for example, `maven-prefetch`), then
