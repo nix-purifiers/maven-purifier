@@ -85,7 +85,7 @@ public final class DocumentationLinksTest {
     MavenProject a = project(root, "a");
     MavenProject b = project(root, "b");
     MavenProject managedProject = project(root, "managed");
-    Plugin managed = managedProject.getBuildPlugins().remove(0);
+    Plugin managed = managedProject.getBuild().getPlugins().remove(0);
     managed.setVersion("3.12.0");
     managed.getExecutions().get(0).setPhase("validate");
     managed.getExecutions().get(0).addGoal("uncaptured-must-not-run");
@@ -106,7 +106,7 @@ public final class DocumentationLinksTest {
     managedProject.getBuild().getPluginsAsMap();
     // This managed plugin has no captured execution and must stay inactive.
     MavenProject untouched = project(root, "untouched");
-    Plugin uncaptured = untouched.getBuildPlugins().remove(0);
+    Plugin uncaptured = untouched.getBuild().getPlugins().remove(0);
     PluginManagement untouchedManagement = new PluginManagement();
     untouchedManagement.addPlugin(uncaptured);
     untouched.getBuild().setPluginManagement(untouchedManagement);
