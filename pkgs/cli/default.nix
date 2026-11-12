@@ -37,7 +37,6 @@ let
     fileset = lib.fileset.unions [
       ../../flake.nix
       ../../flake.lock
-      ../../version.txt
       ../../configs
       ../../lib-overlays
       ../../pkg-overlays
