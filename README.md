@@ -70,12 +70,12 @@ The lock holds what those goals need, so lock the goals you run. The lock
 run also runs the tests, so the lock holds what they need even when a Nix
 build skips them. It locks again only when a `pom.xml`, anything under
 `.mvn/`, the goals or the settings changed; `--force` locks regardless. A
-relock of an unchanged build writes the same lockfile, byte for byte. It
-keeps the recorded resolution of version ranges and SNAPSHOTs. It also
-keeps the recorded Java major version, and runs on the nixpkgs JDK of that
-version whatever `JAVA_HOME` names. A first lock runs on `JAVA_HOME`, or on
-the JDK that maven-purifier's nixpkgs provides (Java 8 for Maven 2 and 3.0). To move to another Java
-version, delete the lockfile and lock again.
+relock of an unchanged build and runtime writes the same lockfile, byte for
+byte. It keeps the recorded resolution of version ranges and SNAPSHOTs.
+Local lock and relock runs use your existing `JAVA_HOME`, or the Java
+runtime on `PATH`. The observed Java major version is recorded in the
+lockfile. Use `--force` when changing runtime, since Maven profiles and
+dependencies may depend on it.
 
 ## Maven versions
 
@@ -92,9 +92,11 @@ export PATH="$PWD/.maven-purifier/bin:$PATH"
 mvn clean install
 ```
 
-That launcher selects the locked JDK too. A first lock defaults to Java 8
-for Maven 2 and 3.0; `JAVA_HOME` can select another JDK. The plugins in your
-POM must also support the Maven and Java versions you select.
+That launcher preserves your `JAVA_HOME` or Java runtime on `PATH`.
+Local locking, dependency fetching and development do not select or build
+a Nix SDK. The plugins in your POM must support the Maven and Java
+versions you select. Full sandboxed builds use an immutable SDK, selected
+by the builder's `jdk` argument or its packaged default.
 
 Maven 2 and 3.0 lack repository download events. Their lock runs use a
 recorder goal and verify each downloaded file against its remote origin.
@@ -267,8 +269,9 @@ out; delete them to resolve online again.
 
 The lines also load maven-purifier's extension, which warns when a Maven of
 another version runs: its default plugin versions differ from the locked
-ones. The locked Maven is `.maven-purifier/bin/mvn`, and nixpkgs' JDK of the
-locked Java major version is `.maven-purifier/jdk`. Put
+ones. The locked Maven is `.maven-purifier/bin/mvn`.
+`.maven-purifier/jdk` points to the existing local runtime observed during
+prefetch; the launcher continues to honor your runtime environment. Put
 `.maven-purifier/bin` on `PATH`, or use a Maven wrapper that names the
 locked version.
 

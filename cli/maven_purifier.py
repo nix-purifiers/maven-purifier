@@ -29,7 +29,8 @@
       points Maven at it: it writes lines of its own at the end of
       .mvn/maven.config, so that `mvn`, `./mvnw` and an editor that reads
       that file resolve offline from the locked files. The locked Maven is
-      .maven-purifier/bin/mvn, and the locked JDK .maven-purifier/jdk.
+      .maven-purifier/bin/mvn. Local builds keep your existing Java runtime;
+      .maven-purifier/jdk points to the runtime found during prefetch.
 
   maven-purifier publish [--lockfile FILE] [--repository-id ID --url URL] [ARG...]
       Builds the release with Nix and deploys it with the locked Maven and
@@ -446,47 +447,50 @@ def unpack_maven(archive, dest):
 
 
 def java_home():
-    home = os.environ.get("JAVA_HOME") or os.environ.get("MAVEN_PURIFIER_DEFAULT_JAVA_HOME")
+    """Select the existing local runtime without realizing or substituting a Nix SDK."""
+    home = os.environ.get("JAVA_HOME")
+    if home:
+        home = str(Path(home).expanduser().absolute())
+        java_version(home)
+        return home
+    executable = shutil.which("java")
+    if executable is None:
+        fail("set JAVA_HOME to an existing Java runtime or put java on PATH")
+    properties = java_properties(executable)
+    if not properties.get("java.version"):
+        fail(f"could not read the version of the existing runtime {executable}")
+    home = properties.get("java.home")
     if not home:
-        fail("set JAVA_HOME to the JDK that runs Maven")
+        fail(f"could not read java.home from the existing runtime {executable}")
+    # Java 8 reports its nested JRE directory even when java belongs to a JDK.
+    path = Path(home)
+    if path.name == "jre" and (path.parent / "bin/javac").is_file():
+        return str(path.parent)
     return home
 
 
-def locked_jdk(major):
-    """The JAVA_HOME of nixpkgs' headless JDK of a Java major version, from the nixpkgs of this flake."""
-    expression = f"""
-      let
-        flake = builtins.getFlake ("path:" + builtins.getEnv "MAVEN_PURIFIER_FLAKE");
-        pkgs = import flake.inputs.nixpkgs {{ system = builtins.currentSystem; }};
-      in
-      pkgs.javaPackages.compiler."openjdk{major}".headless
-    """
+def java_properties(executable):
     try:
-        jdk = subprocess.run(
-            ["nix", "build", "--impure", "--no-link", "--print-out-paths", "--expr", expression],
+        out = subprocess.run(
+            [str(executable), "-XshowSettings:properties", "-version"],
             check=True,
-            stdout=subprocess.PIPE,
+            capture_output=True,
             text=True,
-        ).stdout.strip()
-    except subprocess.CalledProcessError:
-        fail(f"nixpkgs has no headless JDK {major}, the Java major version of the lock")
-    # The home of nixpkgs' OpenJDK is its lib/openjdk. On darwin the JDK is
-    # Azul Zulu, whose store path is the home, as its `home` attribute says.
-    home = f"{jdk}/lib/openjdk"
-    return home if os.path.isdir(home) else jdk
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        fail(f"cannot run the existing Java runtime {executable}: {error}")
+    properties = {}
+    for line in (out.stderr + "\n" + out.stdout).splitlines():
+        key, sep, value = line.strip().partition(" = ")
+        if sep:
+            properties[key] = value
+    return properties
 
 
 def java_version(home):
-    out = subprocess.run(
-        [f"{home}/bin/java", "-XshowSettings:properties", "-version"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    for line in out.stderr.splitlines():
-        key, sep, value = line.strip().partition(" = ")
-        if sep and key == "java.version":
-            return value
+    version = java_properties(f"{home}/bin/java").get("java.version")
+    if version:
+        return version
     fail(f"could not read the version of the JDK at {home}")
 
 
@@ -907,10 +911,9 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
             info(f"{lock_path} is up to date; pass --force to lock again")
             return
 
-    # A relock keeps the Java major version of the previous lock, on
-    # nixpkgs' JDK of that version, so that JAVA_HOME does not move it. A
-    # first lock runs on JAVA_HOME, or on the JDK of this maven-purifier.
-    home = locked_jdk(previous["javaMajor"]) if previous and previous.get("javaMajor") else java_home()
+    # Capture and relock both use the caller's existing runtime. javaMajor
+    # records that observation; it is not a local SDK selection table.
+    home = java_home()
     with tempfile.TemporaryDirectory(prefix="maven-purifier-lock-") as tmp:
         tmp = Path(tmp)
         url = distribution_url(root)
@@ -922,9 +925,6 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
         if inputs and maven_version_tuple(mvn) < (3, 0, 0):
             fail("native Nix project inputs currently need Maven 3 or newer; "
                  "older Maven builds can use the Nix builder's projectDependencies argument")
-        if not previous and not os.environ.get("JAVA_HOME") and maven_version_tuple(mvn) < (3, 1, 0):
-            home = os.environ.get("MAVEN_PURIFIER_LEGACY_JAVA_HOME", home)
-
         project = tmp / "project"
         copy_build(root, project)
         repo = tmp / "repository"
@@ -1179,6 +1179,22 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
 
 def nix_expression(attribute):
     """A Nix expression for an attribute of this flake's buildMavenProject, for the build root and lockfile in the environment."""
+    if attribute == "prefetch":
+        return """
+          let
+            flake = builtins.getFlake ("path:" + builtins.getEnv "MAVEN_PURIFIER_FLAKE");
+            pkgs = import flake.inputs.nixpkgs {
+              system = builtins.currentSystem;
+              overlays = [ flake.overlays.default ];
+            };
+            inputs = pkgs.callPackage (flake.outPath + "/pkgs/build-maven-project/locked-inputs.nix") {
+              inherit (flake.lib) purifier;
+            };
+          in (inputs {
+            src = /. + builtins.getEnv "MAVEN_PURIFIER_ROOT";
+            lockFile = /. + builtins.getEnv "MAVEN_PURIFIER_LOCKFILE";
+          }).prefetch
+        """
     return f"""
       let
         flake = builtins.getFlake ("path:" + builtins.getEnv "MAVEN_PURIFIER_FLAKE");
@@ -1224,6 +1240,7 @@ def prefetch(args):
     lock_path = options.lock_path(root)
     lock_data = read_lock(lock_path)
     check_fresh(root, lock_path, lock_data)
+    host_java = java_home()
     state = root / STATE_DIR
     state.mkdir(exist_ok=True)
 
@@ -1265,15 +1282,14 @@ def prefetch(args):
     jdk = state / "jdk"
     if jdk.is_symlink() or jdk.exists():
         jdk.unlink()
-    jdk.symlink_to(prefetched / "jdk")
+    jdk.symlink_to(host_java)
     # Maven before 3.3.1 ignores .mvn/maven.config. Pass the locked settings
-    # explicitly, and select the locked JDK even when the caller has another.
+    # explicitly. The caller's runtime remains in control of local builds.
     launcher = bin_dir / "mvn"
     if launcher.is_symlink():
         launcher.unlink()
     launcher.write_text(
         "#!/bin/sh\n"
-        f"export JAVA_HOME={shlex.quote(str(jdk))}\n"
         f"exec {shlex.quote(str(prefetched / 'maven' / 'bin' / 'mvn'))} "
         f"-Dmaven.ext.class.path={shlex.quote(os.environ['MAVEN_PURIFIER_EXTENSION'])} "
         "-Dmaven-purifier.replay=true "
@@ -1293,7 +1309,8 @@ def prefetch(args):
     )
     info(
         f"Maven resolves offline from {repo} now. The locked Maven {lock_data['maven']['version']} is "
-        f"{state / 'bin' / 'mvn'}, and the JDK of Java {lock_data['javaMajor']} is {state / 'jdk'}."
+        f"{state / 'bin' / 'mvn'}. Local builds use your existing Java runtime; "
+        f"the runtime found during prefetch is {host_java}."
     )
 
 
