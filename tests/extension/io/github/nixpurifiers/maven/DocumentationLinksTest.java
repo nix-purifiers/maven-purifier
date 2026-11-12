@@ -140,6 +140,7 @@ public final class DocumentationLinksTest {
       DocumentationLinks.apply(session);
       check(a, repository, "a");
       check(b, repository, "b");
+      if (managedProject.getBuildPlugins().isEmpty()) throw new AssertionError("captured managed CLI plugin was not projected");
       Plugin materialized = managedProject.getBuildPlugins().get(0);
       if (!"3.12.0".equals(materialized.getVersion()) || materialized.getDependencies().size() != 1) throw new AssertionError("managed plugin identity changed");
       if (materialized.getExecutions().size() != 1 || materialized.getExecutionsAsMap().get("attach-docs") != null) throw new AssertionError("uncaptured managed execution activated");
