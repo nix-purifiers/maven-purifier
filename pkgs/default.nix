@@ -5,7 +5,7 @@
 # `pkgs.maven-purifier.overrideScope` replaces what the packages share.
 { callPackage, lib, ... }:
 let
-  version = builtins.replaceStrings [ "\n" ] [ "" ] (builtins.readFile ../version.txt);
+  version = import ./version.nix;
   extension = callPackage ./extension { inherit version; };
 in
 {
