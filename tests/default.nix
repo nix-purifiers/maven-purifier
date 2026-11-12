@@ -377,8 +377,9 @@ let
       ''
         jar=${extension}/share/java/maven-purifier-extension.jar
         jar tf $jar | grep -qx 'io/github/nixpurifiers/maven/RecordingEventSpy.class'
+        jar tf $jar | grep -qx 'io/github/nixpurifiers/maven/CompatibleEventSpy.class'
         index=$(jar xf $jar META-INF/sisu/javax.inject.Named && cat META-INF/sisu/javax.inject.Named)
-        grep -qx io.github.nixpurifiers.maven.RecordingEventSpy <<<"$index"
+        grep -qx io.github.nixpurifiers.maven.CompatibleEventSpy <<<"$index"
         grep -qx io.github.nixpurifiers.maven.ProjectedModelProcessor <<<"$index"
         grep -qx io.github.nixpurifiers.maven.ProjectedLifecycleParticipant <<<"$index"
         ${cli}/bin/maven-purifier --help | grep -q 'maven-purifier prefetch'

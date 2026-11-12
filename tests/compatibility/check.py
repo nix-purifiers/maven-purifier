@@ -16,6 +16,9 @@ args = parser.parse_args()
 root = Path(__file__).resolve().parents[2]
 cli = str(args.cli.resolve())
 env = dict(os.environ, JAVA_HOME=str(args.jdk.resolve()))
+if args.version.startswith(("3.1.", "3.2.")):
+    # These wrappers may still name the retired HTTP endpoint of Central.
+    env.setdefault("MAVEN_PURIFIER_CENTRAL_MIRROR", "https://repo.maven.apache.org/maven2/")
 snapshot = json.loads(subprocess.check_output(['nix', 'flake', 'archive', '--json',
     '--no-update-lock-file', str(root)], text=True))['path']
 snapshot = str(Path(snapshot).resolve(strict=True))
@@ -78,7 +81,7 @@ with tempfile.TemporaryDirectory(prefix="maven-compatibility-") as tmp:
     initial = lockfile.read_bytes()
     data = json.loads(initial)
     assert data["maven"]["version"] == args.version
-    assert data["javaMajor"] == ("8" if args.version.startswith(("2.", "3.0.")) else "17")
+    assert data["javaMajor"] == ("8" if args.version.startswith(("2.", "3.0.", "3.1.", "3.2.")) else "17")
     run(cli, "lock", "--force")
     assert lockfile.read_bytes() == initial, "a relock changed the pinned resolution"
     run(cli, "prefetch")
