@@ -45,6 +45,35 @@ final class DocumentationLinks {
     return result;
   }
 
+  private static Plugin managedPlugin(MavenProject project) {
+    if (project.getPluginManagement() != null) {
+      for (Plugin plugin : project.getPluginManagement().getPlugins()) {
+        if ("maven-javadoc-plugin".equals(plugin.getArtifactId())
+            && "org.apache.maven.plugins".equals(plugin.getGroupId())) return plugin;
+      }
+    }
+    return null;
+  }
+
+  private static Plugin capturedPlugin(MavenProject project) {
+    for (Plugin plugin : project.getBuildPlugins()) {
+      if ("maven-javadoc-plugin".equals(plugin.getArtifactId())
+          && "org.apache.maven.plugins".equals(plugin.getGroupId())) return plugin;
+    }
+    // A CLI goal can execute a managed plugin that is absent from build.plugins.
+    // Materialize it only for a captured execution, retaining its dependencies,
+    // version and configuration without activating other managed executions.
+    Plugin managed = managedPlugin(project);
+    Plugin plugin = managed == null ? new Plugin() : managed.clone();
+    plugin.setGroupId("org.apache.maven.plugins");
+    plugin.setArtifactId("maven-javadoc-plugin");
+    plugin.getExecutions().clear();
+    plugin.flushExecutionMap();
+    project.getBuild().addPlugin(plugin);
+    project.getBuild().flushPluginMap();
+    return plugin;
+  }
+
   private static void project(Xpp3Dom config, MavenProject project, Map<String, String> metadata) {
     Xpp3Dom links = config.getChild("links");
     if (links != null) {
@@ -119,8 +148,8 @@ final class DocumentationLinks {
             if (files == 0) throw new IOException("locked documentation metadata is absent");
             metadata.put(base(link.getAttribute("url")), directory.getAbsolutePath());
           }
-          for (Plugin plugin : project.getBuildPlugins()) {
-            if (!"maven-javadoc-plugin".equals(plugin.getArtifactId())) continue;
+          {
+            Plugin plugin = capturedPlugin(project);
             PluginExecution selected = null;
             for (PluginExecution candidate : plugin.getExecutions()) {
               if (execution.getAttribute("id").equals(candidate.getId())) selected = candidate;
@@ -128,6 +157,14 @@ final class DocumentationLinks {
             if (selected == null) {
               selected = new PluginExecution();
               selected.setId(execution.getAttribute("id"));
+              Plugin managed = managedPlugin(project);
+              if (managed != null) {
+                for (PluginExecution candidate : managed.getExecutions()) {
+                  if (selected.getId().equals(candidate.getId()) && candidate.getConfiguration() instanceof Xpp3Dom) {
+                    selected.setConfiguration(new Xpp3Dom((Xpp3Dom) candidate.getConfiguration()));
+                  }
+                }
+              }
               plugin.addExecution(selected);
             }
             Xpp3Dom config = selected.getConfiguration() instanceof Xpp3Dom

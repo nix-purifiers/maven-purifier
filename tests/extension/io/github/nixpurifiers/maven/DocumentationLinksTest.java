@@ -13,6 +13,8 @@ import org.apache.maven.model.Build;
 import org.apache.maven.model.Model;
 import org.apache.maven.model.Plugin;
 import org.apache.maven.model.PluginExecution;
+import org.apache.maven.model.PluginManagement;
+import org.apache.maven.model.Dependency;
 import org.apache.maven.project.MavenProject;
 import org.codehaus.plexus.util.xml.Xpp3Dom;
 import org.eclipse.aether.DefaultRepositorySystemSession;
@@ -82,14 +84,41 @@ public final class DocumentationLinksTest {
     Files.createDirectories(repository.resolve("downloads/javadoc"));
     MavenProject a = project(root, "a");
     MavenProject b = project(root, "b");
+    MavenProject managedProject = project(root, "managed");
+    Plugin managed = managedProject.getBuildPlugins().remove(0);
+    managed.setVersion("3.12.0");
+    managed.getExecutions().get(0).setPhase("validate");
+    managed.getExecutions().get(0).addGoal("uncaptured-must-not-run");
+    PluginExecution cli = new PluginExecution();
+    cli.setId("default-cli");
+    Xpp3Dom cliConfig = new Xpp3Dom("configuration");
+    child(cliConfig, "doctitle", "managed CLI title");
+    cli.setConfiguration(cliConfig);
+    managed.addExecution(cli);
+    Dependency dependency = new Dependency();
+    dependency.setGroupId("example");
+    dependency.setArtifactId("doclet-support");
+    dependency.setVersion("1");
+    managed.addDependency(dependency);
+    PluginManagement management = new PluginManagement();
+    management.addPlugin(managed);
+    managedProject.getBuild().setPluginManagement(management);
+    managedProject.getBuild().getPluginsAsMap();
+    // This managed plugin has no captured execution and must stay inactive.
+    MavenProject untouched = project(root, "untouched");
+    Plugin uncaptured = untouched.getBuildPlugins().remove(0);
+    PluginManagement untouchedManagement = new PluginManagement();
+    untouchedManagement.addPlugin(uncaptured);
+    untouched.getBuild().setPluginManagement(untouchedManagement);
     byte[] content = "org.junit\n".getBytes(StandardCharsets.UTF_8);
     StringBuilder index = new StringBuilder("<javadoc version=\"1\">");
-    for (String name : Arrays.asList("a", "b")) {
+    for (String name : Arrays.asList("a", "b", "managed")) {
       Path directory = repository.resolve("downloads/javadoc/" + name);
       Files.createDirectories(directory);
       Files.write(directory.resolve("package-list"), content);
       index.append("<project id=\"").append(name).append("\">");
       for (String id : Arrays.asList("attach-docs", "default-cli")) {
+        if ("managed".equals(name) && !"default-cli".equals(id)) continue;
         index.append("<execution id=\"").append(id).append("\"><link url=\"https://docs.example.invalid/")
             .append(name).append("\" directory=\"downloads/javadoc/").append(name)
             .append("\"><source name=\"package-list\" sha256=\"").append(digest(content))
@@ -104,13 +133,23 @@ public final class DocumentationLinksTest {
     DefaultRepositorySystemSession resolver = new DefaultRepositorySystemSession();
     resolver.setOffline(true);
     MavenSession session = new MavenSession(null, resolver, request, new DefaultMavenExecutionResult());
-    session.setProjects(Arrays.asList(a, b));
+    session.setProjects(Arrays.asList(a, b, managedProject, untouched));
     String previous = System.getProperty("maven-purifier.root");
     System.setProperty("maven-purifier.root", root.toString());
     try {
       DocumentationLinks.apply(session);
       check(a, repository, "a");
       check(b, repository, "b");
+      Plugin materialized = managedProject.getBuildPlugins().get(0);
+      if (!"3.12.0".equals(materialized.getVersion()) || materialized.getDependencies().size() != 1) throw new AssertionError("managed plugin identity changed");
+      if (materialized.getExecutions().size() != 1 || materialized.getExecutionsAsMap().get("attach-docs") != null) throw new AssertionError("uncaptured managed execution activated");
+      PluginExecution projected = materialized.getExecutionsAsMap().get("default-cli");
+      Xpp3Dom projectedConfig = (Xpp3Dom) projected.getConfiguration();
+      if (!"managed CLI title".equals(projectedConfig.getChild("doctitle").getValue())) throw new AssertionError("managed CLI configuration lost");
+      if (projected.getPhase() != null || !projected.getGoals().isEmpty()) throw new AssertionError("managed CLI bound a lifecycle phase");
+      if (projectedConfig.getChild("links").getChildCount() != 0 || projectedConfig.getChild("offlineLinks").getChildCount() != 1) throw new AssertionError("managed CLI link not projected");
+      if (managed.getExecutions().size() != 2 || ((Xpp3Dom) managed.getConfiguration()).getChild("links").getChildCount() != 1) throw new AssertionError("original pluginManagement changed");
+      if (!untouched.getBuildPlugins().isEmpty()) throw new AssertionError("uncaptured managed plugin activated");
       Files.write(repository.resolve("downloads/javadoc/a/package-list"), "changed\n".getBytes(StandardCharsets.UTF_8));
       try {
         DocumentationLinks.apply(session);
