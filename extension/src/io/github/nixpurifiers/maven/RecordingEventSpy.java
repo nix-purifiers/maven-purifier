@@ -8,6 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.LinkedHashSet;
+import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
@@ -49,6 +50,7 @@ public class RecordingEventSpy extends AbstractEventSpy {
   private Writer out;
   private String lockedMaven;
   private final Set<String> unresolved = new LinkedHashSet<>();
+  private final Map<org.apache.maven.plugin.MojoExecution, DocumentationCapture.Invocation> documentation = new IdentityHashMap<>();
 
   @Override
   public void init(Context context) throws IOException {
@@ -89,24 +91,20 @@ public class RecordingEventSpy extends AbstractEventSpy {
     }
     if (event instanceof org.apache.maven.execution.ExecutionEvent) {
       org.apache.maven.execution.ExecutionEvent execution = (org.apache.maven.execution.ExecutionEvent) event;
-      if (execution.getType() == org.apache.maven.execution.ExecutionEvent.Type.MojoSucceeded
-          && execution.getMojoExecution() != null
-          && "org.apache.maven.plugins".equals(execution.getMojoExecution().getGroupId())
-          && "maven-javadoc-plugin".equals(execution.getMojoExecution().getArtifactId())) {
-        try {
-          java.io.File stale = new java.io.File(execution.getProject().getBuild().getDirectory(),
-              "maven-javadoc-plugin-stale-data.txt");
-          org.codehaus.plexus.util.xml.Xpp3Dom config = execution.getMojoExecution().getConfiguration();
-          if (config != null && config.getChild("staleDataPath") != null) {
-            Object value = new org.apache.maven.plugin.PluginParameterExpressionEvaluator(
-                execution.getSession(), execution.getMojoExecution()).evaluate(config.getChild("staleDataPath").getValue());
-            if (value != null) stale = value instanceof java.io.File ? (java.io.File) value : new java.io.File(value.toString());
-          }
-          DocumentationCapture.write(out, execution.getProject(), execution.getMojoExecution().getExecutionId(), stale);
-        } catch (Exception error) {
-          out.write("{\"event\":\"javadoc-error\",\"message\":" + DocumentationCapture.json(error.toString()) + "}\n");
-          out.flush();
+      try {
+        if (execution.getType() == org.apache.maven.execution.ExecutionEvent.Type.MojoStarted) {
+          DocumentationCapture.Invocation invocation = DocumentationCapture.started(execution);
+          if (invocation != null) documentation.put(execution.getMojoExecution(), invocation);
+        } else if (execution.getType() == org.apache.maven.execution.ExecutionEvent.Type.MojoSucceeded) {
+          DocumentationCapture.Invocation invocation = documentation.remove(execution.getMojoExecution());
+          if (invocation != null) invocation.write(out);
+        } else if (execution.getType() == org.apache.maven.execution.ExecutionEvent.Type.MojoFailed
+            || "MojoSkipped".equals(execution.getType().name())) {
+          documentation.remove(execution.getMojoExecution());
         }
+      } catch (Exception error) {
+        out.write("{\"event\":\"javadoc-error\",\"message\":" + DocumentationCapture.json(error.toString()) + "}\n");
+        out.flush();
       }
       return;
     }
