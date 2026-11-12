@@ -1,14 +1,17 @@
 # Log4j native Docker proof
 
-The dedicated `log4j-native` job runs on an ordinary PR's **opened** event only,
-with a 45-minute job limit. Later pushes, reopenings and manual retries need a
-separately authorized run; the initial result does not cover a new head.
-Existing repository PR checks continue normally.
+The dedicated `log4j-native` job runs on ordinary PR **opened** and
+**synchronize** events only when the PR changes its dedicated workflow, script
+or this document, with a 45-minute job limit. Each additional head/retry needs
+separate authorization; a result covers only its recorded head. Unrelated PRs
+do not start this job. Existing repository PR checks continue normally.
 
 The harness records the PR checkout independently from the tested purifier,
 which is pinned to public commit `301ee83db0a6ddde7d4ea4f385fa8d33ee4af5be`
 and source NAR `sha256-rB8d3s58bog0Q436qLdx9+oe3wrgNjjiUtB8+xbYluM=`.
-It builds that immutable source without rewriting its lockfile, binds the CLI
+It builds an exact-revision local Git flake reference, rather than assuming
+that a metadata store path is already materialized. It preserves the source
+NAR check and never rewrites the lockfile, and binds the CLI
 output/derivation/NAR to the source, and supplies explicit Zulu Java 17 plus an
 owned writable JVM home.
 

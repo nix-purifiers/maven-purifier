@@ -1,11 +1,12 @@
-# One opened-PR native proof; later heads/retries need a separately authorized run.
+# Dedicated native proof; each corrected head/retry needs separate authorization.
 name: Log4j native Docker proof
 on:
   pull_request:
-    types: [opened]
+    types: [opened, synchronize]
     paths:
       - '.github/workflows/log4j-native-proof.yml'
       - 'tests/real-world/log4j-native-proof.py'
+      - 'docs/development/log4j-native-proof.md'
 permissions:
   contents: read
 jobs:
@@ -36,7 +37,7 @@ jobs:
           sha256sum flake.lock > "$RUNNER_TEMP/log4j-flake-lock-before.txt"
           nix flake metadata --no-write-lock-file --json . > "$RUNNER_TEMP/log4j-source.json"
           source=$(python3 -c 'import json,os; d=json.load(open(os.environ["RUNNER_TEMP"]+"/log4j-source.json")); assert d["revision"]=="301ee83db0a6ddde7d4ea4f385fa8d33ee4af5be"; assert d["locked"]["narHash"]=="sha256-rB8d3s58bog0Q436qLdx9+oe3wrgNjjiUtB8+xbYluM="; print(d["path"])')
-          timeout --kill-after=15s 600s nix build --no-write-lock-file "$source#cli" --json --out-link "$RUNNER_TEMP/log4j-cli" --max-jobs 1 --cores 2 > "$RUNNER_TEMP/log4j-build.json"
+          timeout --kill-after=15s 600s nix build --no-write-lock-file "git+file://$PWD?rev=301ee83db0a6ddde7d4ea4f385fa8d33ee4af5be&shallow=1#cli" --json --out-link "$RUNNER_TEMP/log4j-cli" --max-jobs 1 --cores 2 > "$RUNNER_TEMP/log4j-build.json"
           sha256sum --check "$RUNNER_TEMP/log4j-flake-lock-before.txt"
           git diff --exit-code HEAD --
       - name: Select upstream's explicit SDK17 family
