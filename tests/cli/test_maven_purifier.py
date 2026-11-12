@@ -221,6 +221,32 @@ class OfflineSettings(TemporaryTree):
         self.assertEqual(settings.findtext("offline"), "true")
 
 
+class LocalJava(unittest.TestCase):
+    def test_explicit_runtime_wins_over_bundled_default(self):
+        with (
+            mock.patch.dict(os.environ, {"JAVA_HOME": "/host/sdk", "MAVEN_PURIFIER_DEFAULT_JAVA_HOME": "/bundled/sdk"}, clear=True),
+            mock.patch.object(mp, "java_properties", return_value={"java.version": "99", "java.home": "/host/sdk"}) as probe,
+        ):
+            self.assertEqual(mp.java_home(), "/host/sdk")
+            probe.assert_called_once_with("/host/sdk/bin/java")
+
+    def test_path_runtime_is_used_without_java_home(self):
+        with (
+            mock.patch.dict(os.environ, {"MAVEN_PURIFIER_DEFAULT_JAVA_HOME": "/bundled/sdk"}, clear=True),
+            mock.patch.object(mp.shutil, "which", return_value="/host/bin/java"),
+            mock.patch.object(mp, "java_properties", return_value={"java.version": "99", "java.home": "/host/sdk"}),
+        ):
+            self.assertEqual(mp.java_home(), "/host/sdk")
+
+    def test_missing_local_runtime_does_not_select_bundled_sdk(self):
+        with (
+            mock.patch.dict(os.environ, {"MAVEN_PURIFIER_DEFAULT_JAVA_HOME": "/bundled/sdk"}, clear=True),
+            mock.patch.object(mp.shutil, "which", return_value=None),
+        ):
+            with self.assertRaises(SystemExit):
+                mp.java_home()
+
+
 class ArtifactKey(unittest.TestCase):
     def test_keys(self):
         self.assertEqual(mp.artifact_key({"artifactId": "core", "classifier": "", "extension": "jar"}), "core.jar")

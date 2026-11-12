@@ -262,17 +262,19 @@ let
   conformanceOffline =
     pkgs.runCommand "maven-purifier-conformance-offline"
       {
-        nativeBuildInputs = [ pkgs.coreutils ];
+        nativeBuildInputs = [
+          pkgs.coreutils
+          multi.jdk
+        ];
       }
       ''
-        export HOME=$TMPDIR/home
+        export HOME=$TMPDIR/home JAVA_HOME=${multi.jdk.home}
         mkdir -p $HOME
         cp -r ${./fixtures/multi} $TMPDIR/multi
         chmod -R u+w $TMPDIR/multi
         cd $TMPDIR/multi
         ${cli}/bin/maven-purifier prefetch --prefetched ${multi.prefetch}
         grep -qx -- '-Dmaven-purifier.prefetched=true' .mvn/maven.config
-        export JAVA_HOME=$PWD/.maven-purifier/jdk
         .maven-purifier/bin/mvn -B -ntp clean install 2>&1 | tee $TMPDIR/mvn.log
         grep -q 'Tests run: 2, Failures: 0' $TMPDIR/mvn.log
         test -f app/target/app-1.0.0.jar
@@ -306,9 +308,15 @@ let
   # Execute the ordinary Maven workflow in a networkless derivation too.
   # The networked capture/relock job prepares the same committed lock.
   gsonOffline =
-    pkgs.runCommand "maven-purifier-gson-offline" { nativeBuildInputs = [ pkgs.python3 ]; }
+    pkgs.runCommand "maven-purifier-gson-offline"
+      {
+        nativeBuildInputs = [
+          pkgs.python3
+          gson.jdk
+        ];
+      }
       ''
-        export HOME=$TMPDIR/home
+        export HOME=$TMPDIR/home JAVA_HOME=${gson.jdk.home}
         mkdir -p "$HOME" "$out"
         cp -r ${gsonSource} $TMPDIR/gson
         chmod -R u+w $TMPDIR/gson
@@ -316,7 +324,6 @@ let
         ${cli}/bin/maven-purifier prefetch \
           --lockfile ${./real-world/gson/maven-purifier.lock.json} \
           --prefetched ${gson.prefetch}
-        export JAVA_HOME=$PWD/.maven-purifier/jdk
         export PATH=$PWD/.maven-purifier/bin:$PATH
         mvn --version > "$out/toolchain.txt"
         mvn -B -ntp clean install > "$out/maven.log" 2>&1
