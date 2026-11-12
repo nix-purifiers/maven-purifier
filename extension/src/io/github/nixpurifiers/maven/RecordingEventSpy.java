@@ -5,7 +5,9 @@ import java.io.IOException;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.LinkedHashSet;
 import java.util.IdentityHashMap;
@@ -48,6 +50,7 @@ import org.eclipse.aether.repository.RemoteRepository;
 public class RecordingEventSpy extends AbstractEventSpy {
 
   private Writer out;
+  private Path downloadDirectory;
   private String lockedMaven;
   private final Set<String> unresolved = new LinkedHashSet<>();
   private final Map<org.apache.maven.plugin.MojoExecution, DocumentationCapture.Invocation> documentation = new IdentityHashMap<>();
@@ -56,6 +59,8 @@ public class RecordingEventSpy extends AbstractEventSpy {
   public void init(Context context) throws IOException {
     String record = System.getenv("MAVEN_PURIFIER_RECORD");
     if (record != null && !record.isEmpty()) {
+      Path recordPath = Paths.get(record).toAbsolutePath();
+      downloadDirectory = recordPath.resolveSibling(recordPath.getFileName() + ".downloads");
       out =
           Files.newBufferedWriter(
               Paths.get(record),
@@ -187,6 +192,19 @@ public class RecordingEventSpy extends AbstractEventSpy {
 
   private void download(RemoteRepository repository, String path, RepositoryEvent e)
       throws IOException {
+    // An install later in this reactor can replace this very repository path.
+    // Preserve the successful transfer's bytes before returning to Maven.
+    Path snapshot;
+    try {
+      Files.createDirectories(downloadDirectory);
+      snapshot = Files.createTempFile(downloadDirectory, "download-", ".bin");
+      Files.copy(e.getFile().toPath(), snapshot, StandardCopyOption.REPLACE_EXISTING);
+    } catch (IOException error) {
+      out.write("{\"event\":\"download-error\",\"url\":" + json(url(repository, path))
+          + ",\"message\":" + json(error.toString()) + "}\n");
+      out.flush();
+      return;
+    }
     out.write(
         "{\"event\":\"download\",\"repository\":"
             + json(repository.getId())
@@ -196,6 +214,8 @@ public class RecordingEventSpy extends AbstractEventSpy {
             + json(url(repository, path))
             + ",\"file\":"
             + json(e.getFile().getAbsolutePath())
+            + ",\"snapshot\":"
+            + json(snapshot.toAbsolutePath().toString())
             + "}\n");
     out.flush();
   }

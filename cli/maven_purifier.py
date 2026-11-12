@@ -678,7 +678,22 @@ def copy_build(root, dest):
 
 def read_record(path):
     with open(path) as f:
-        return [json.loads(line) for line in f if line.strip()]
+        events = [json.loads(line) for line in f if line.strip()]
+    for event in events:
+        if event.get("event") == "download-error":
+            fail(f"cannot preserve downloaded bytes of {event.get('url')}: {event.get('message')}")
+    return events
+
+
+def download_source(event, record):
+    """The transfer's private snapshot, or the verified legacy recorder's file."""
+    if "snapshot" not in event:
+        return Path(event["file"])
+    source = Path(event["snapshot"])
+    owned = record.with_name(record.name + ".downloads").resolve()
+    if not source.is_absolute() or not source.resolve().is_relative_to(owned) or not source.is_file():
+        fail(f"invalid download snapshot for {event.get('url')}: {source}")
+    return source
 
 
 def artifact_key(install):
@@ -1017,6 +1032,7 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
 
         events = read_record(record) if record.exists() else []
         downloads = {}
+        download_sources = {}
         development_paths = set()
         repository_urls = {}
         for index, e in enumerate(events):
@@ -1036,6 +1052,7 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
             for path in found:
                 if path not in downloads:
                     downloads[path] = e["url"]
+                    download_sources[path] = download_source(e, record)
                     if index >= build_events:
                         development_paths.add(path)
             repository_urls.setdefault(e["repository"], e["repositoryUrl"])
@@ -1045,6 +1062,7 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
         for path in sorted(seeded):
             if path in read_metadata and path not in downloads and (repo / path).is_file():
                 downloads[path] = None
+                download_sources[path] = repo / path
 
         installs = [e for e in events if e["event"] == "install"]
         installed = {Path(e["file"]).relative_to(repo).as_posix() for e in installs}
@@ -1080,6 +1098,7 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
             if repository is not None and repository in repository_urls and "SNAPSHOT" not in rel:
                 base_url = str(repository_urls[repository])
                 downloads[rel] = (base_url if base_url.endswith("/") else base_url + "/") + rel
+                download_sources[rel] = path
                 continue
             unrecorded.append(rel)
         if unrecorded:
@@ -1101,9 +1120,9 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
             if rel in declared_paths:
                 continue
             if Path(rel).name.startswith("maven-metadata"):
-                entry = {"path": rel, "contents": (repo / rel).read_text()}
+                entry = {"path": rel, "contents": download_sources[rel].read_text()}
             else:
-                entry = file_entry(rel, src, sri(repo / rel))
+                entry = file_entry(rel, src, sri(download_sources[rel]))
             if rel in development_paths:
                 entry["development"] = True
             entries.append(entry)

@@ -746,5 +746,31 @@ class JavadocResourcesTests(TemporaryTree):
         self.assertEqual(link.get("metadata"), "https://cache.example/versioned")
 
 
+class DownloadSnapshots(TemporaryTree):
+    def test_observed_bytes_survive_repository_install(self):
+        record = self.root / "record.jsonl"
+        downloaded = self.write("record.jsonl.downloads/native.bin", "published bytes")
+        final = self.write("repository/example/same/1/same-1-tests.jar", "locally installed bytes")
+        event = {"event": "download", "file": str(final), "snapshot": str(downloaded), "url": "https://origin.example/same.jar"}
+        source = mp.download_source(event, record)
+        self.assertEqual(source.read_text(), "published bytes")
+        self.assertNotEqual(mp.sri(source), mp.sri(final))
+
+    def test_legacy_verified_file_stays_supported(self):
+        source = self.write("legacy.jar", "verified legacy bytes")
+        self.assertEqual(mp.download_source({"file": str(source)}, self.root / "record.jsonl"), source)
+
+    def test_missing_or_foreign_snapshot_fails_closed(self):
+        record = self.root / "record.jsonl"
+        for source in [self.root / "record.jsonl.downloads/missing", self.write("foreign.bin", "foreign")]:
+            with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+                mp.download_source({"file": str(source), "snapshot": str(source), "url": "https://origin.example/a"}, record)
+
+    def test_failed_snapshot_cannot_silently_drop_the_download(self):
+        record = self.write("record.jsonl", json.dumps({"event": "download-error", "url": "https://origin.example/a", "message": "copy failed"}) + "\n")
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+            mp.read_record(record)
+
+
 if __name__ == "__main__":
     unittest.main()
