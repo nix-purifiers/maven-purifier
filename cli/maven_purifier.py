@@ -1238,6 +1238,18 @@ def write_maven_config(root, lines):
     config.write_text(own + "\n".join([PREFETCH_MARKER, *lines]) + "\n")
 
 
+def link_prefetched_toolchains(prefetched, state):
+    """Bind configured Nix JDKs, removing stale bindings when SDKs change."""
+    target = state / "toolchains.xml"
+    if target.exists() or target.is_symlink():
+        target.unlink()
+    source = prefetched / "toolchains.xml"
+    if source.is_file():
+        target.symlink_to(source)
+        return target
+    return None
+
+
 def prefetch(args):
     options = Options(args, values=("--prefetched",))
     if options.rest:
@@ -1289,6 +1301,8 @@ def prefetch(args):
     if jdk.is_symlink() or jdk.exists():
         jdk.unlink()
     jdk.symlink_to(host_java)
+    toolchains = link_prefetched_toolchains(prefetched, state)
+    toolchain_options = f"--toolchains {shlex.quote(str(toolchains))} " if toolchains else ""
     # Maven before 3.3.1 ignores .mvn/maven.config. Pass the locked settings
     # explicitly. The caller's runtime remains in control of local builds.
     launcher = bin_dir / "mvn"
@@ -1300,7 +1314,7 @@ def prefetch(args):
         f"-Dmaven.ext.class.path={shlex.quote(os.environ['MAVEN_PURIFIER_EXTENSION'])} "
         "-Dmaven-purifier.replay=true "
         f"-Dmaven-purifier.root={shlex.quote(str(root))} "
-        f"-o --settings {shlex.quote(str(state / 'settings.xml'))} \"$@\"\n"
+        f"-o --settings {shlex.quote(str(state / 'settings.xml'))} {toolchain_options}\"$@\"\n"
     )
     launcher.chmod(0o755)
 
@@ -1308,6 +1322,7 @@ def prefetch(args):
         root,
         [
             f"--settings={state / 'settings.xml'}",
+            *([f"--toolchains={toolchains}"] if toolchains else []),
             f"-Dmaven.ext.class.path={os.environ['MAVEN_PURIFIER_EXTENSION']}",
             f"-Dmaven-purifier.maven={lock_data['maven']['version']}",
             "-Dmaven-purifier.replay=true",

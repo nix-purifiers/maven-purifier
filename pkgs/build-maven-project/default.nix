@@ -71,6 +71,10 @@ arguments@{
   # The JDK that runs Maven. The default is nixpkgs' headless JDK of the
   # Java major version the lock was made with.
   jdk ? null,
+  # Additional JDKs for Maven's compiler/test toolchain selection. Each
+  # entry has `jdk` (a Nix JDK with a `home`) and string-valued `provides`
+  # matching the project's Maven toolchain requirements, including version.
+  jdkToolchains ? [ ],
   # Further arguments for Maven.
   mavenFlags ? [ ],
   # Filters the build root before it is copied into the store, as the
@@ -142,6 +146,41 @@ let
     javaPackages.compiler."openjdk${javaMajor}".headless
       or (throw "maven-purifier: javaPackages has no openjdk${javaMajor} for the Java ${lock.javaMajor} the lock was made with; pass `jdk`.");
   jdk' = if jdk != null then jdk else defaultJdk;
+
+  escapeXml = lib.replaceStrings [ "&" "<" ">" "\"" "'" ] [ "&amp;" "&lt;" "&gt;" "&quot;" "&apos;" ];
+  validToolchain =
+    t:
+    builtins.isAttrs t
+    && builtins.isAttrs (t.jdk or null)
+    && (
+      builtins.isString (t.jdk.home or null)
+      || builtins.isPath (t.jdk.home or null)
+      || lib.isDerivation (t.jdk.home or null)
+    )
+    && builtins.isAttrs (t.provides or null)
+    && builtins.isString (t.provides.version or null)
+    && lib.all builtins.isString (builtins.attrValues t.provides)
+    && lib.all (name: builtins.match "[A-Za-z_][A-Za-z0-9_.-]*" name != null) (
+      builtins.attrNames t.provides
+    );
+  toolchainsXml =
+    if jdkToolchains == [ ] then
+      null
+    else
+      assert lib.assertMsg (builtins.isList jdkToolchains && lib.all validToolchain jdkToolchains)
+        "maven-purifier: jdkToolchains entries need a JDK with home and string-valued provides including version";
+      writeText "maven-jdk-toolchains.xml" (
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<toolchains>\n"
+        + lib.concatMapStrings (
+          t:
+          "<toolchain><type>jdk</type><provides>"
+          + lib.concatMapStrings (name: "<${name}>${escapeXml t.provides.${name}}</${name}>") (
+            builtins.attrNames t.provides
+          )
+          + "</provides><configuration><jdkHome>${escapeXml (toString t.jdk.home)}</jdkHome></configuration></toolchain>\n"
+        ) jdkToolchains
+        + "</toolchains>\n"
+      );
 
   # The goals of a build: the locked goals, with `deploy` replaced by
   # `install`. Deploying is the job of `release.publish`, which deploys what
@@ -217,7 +256,7 @@ let
     ${maven}/bin/mvn -o -B \
       -Dmaven-purifier.root="$PWD" \
       ${lib.optionalString (lib.versionAtLeast lock.version "3.1") "-Dmaven.ext.class.path=${extension}/share/java/maven-purifier-extension.jar -Dmaven-purifier.replay=true"} \
-      -s ${settings} \
+      -s ${settings}${lib.optionalString (toolchainsXml != null) " --toolchains ${toolchainsXml}"} \
       -Dmaven.repo.local="$TMPDIR/repository" \
       -Duser.home="$HOME" \
       -Daether.remoteRepositoryFilter.prefixes=false \
@@ -397,6 +436,9 @@ let
     ln -s ${maven} $out/maven
     ln -s ${jdk'.home} $out/jdk
     ln -s ${settings} $out/settings.xml
+    ${lib.optionalString (toolchainsXml != null) ''
+      ln -s ${toolchainsXml} $out/toolchains.xml
+    ''}
     ${lib.optionalString (projectDependencies != [ ]) ''
       ${python3}/bin/python ${./project-inputs.py} properties \
         ${provided.maven.catalog} "$out/project-inputs.properties"

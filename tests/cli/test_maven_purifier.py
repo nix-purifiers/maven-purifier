@@ -9,6 +9,7 @@ Run with the module's path in MAVEN_PURIFIER_CLI:
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -118,6 +119,50 @@ class GeneratedObr(TemporaryTree):
                      '<repository><referral url="https://example.org/"/></repository>'):
             path = self.write("repository.xml", text)
             self.assertFalse(mp.generated_obr_index(path, self.root, set()))
+
+
+class PrefetchedToolchains(TemporaryTree):
+    def test_native_launcher_passes_configured_toolchains_as_one_path_argument(self):
+        prefetched = self.root / "prefetched SDKs"
+        (prefetched / "repository").mkdir(parents=True)
+        (prefetched / "jdk").mkdir()
+        backend = self.write("prefetched SDKs/maven/bin/mvn",
+                             f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n")
+        backend.chmod(0o755)
+        self.write("prefetched SDKs/toolchains.xml", "<toolchains/>")
+        lock = {"javaMajor": "21", "maven": {"version": "3.9.11"}}
+        def settings(_lock, _repo, target):
+            target.write_text("<settings/>")
+        with mock.patch.object(mp, "build_root", return_value=self.root), \
+             mock.patch.object(mp, "read_lock", return_value=lock), \
+             mock.patch.object(mp, "check_fresh"), \
+             mock.patch.object(mp, "offline_settings", side_effect=settings), \
+             mock.patch.dict(os.environ, {"MAVEN_PURIFIER_EXTENSION": "/recording-extension.jar"}):
+            mp.prefetch(["--prefetched", str(prefetched)])
+        state = self.root / mp.STATE_DIR
+        argv = json.loads(subprocess.check_output([str(state / "bin/mvn"), "verify"], text=True))
+        self.assertEqual(argv[-3:], ["--toolchains", str(state / "toolchains.xml"), "verify"])
+        self.assertIn(f"--toolchains={state / 'toolchains.xml'}", (self.root / ".mvn/maven.config").read_text())
+
+    def test_links_the_sdk_configuration_without_copying_store_paths_into_source(self):
+        prefetched = self.root / "prefetched"
+        state = self.root / "state with spaces"
+        state.mkdir()
+        xml = self.write("prefetched/toolchains.xml", "<toolchains/>")
+        target = mp.link_prefetched_toolchains(prefetched, state)
+        self.assertEqual(target, state / "toolchains.xml")
+        self.assertTrue(target.is_symlink())
+        self.assertEqual(target.resolve(), xml)
+
+    def test_reversing_configuration_removes_a_stale_sdk_binding(self):
+        prefetched = self.root / "prefetched"
+        prefetched.mkdir()
+        state = self.root / "state"
+        state.mkdir()
+        stale = state / "toolchains.xml"
+        stale.symlink_to(self.root / "missing-old-prefetch")
+        self.assertIsNone(mp.link_prefetched_toolchains(prefetched, state))
+        self.assertFalse(stale.is_symlink())
 
 
 class TrackedRepository(TemporaryTree):

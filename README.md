@@ -177,6 +177,47 @@ builder takes, such as `javaPackages` or `stdenvNoCC`, and
 `maven-purifier.overrideScope` replaces what the scope shares, such as
 `fetchurl`.
 
+For builds that select separate compiler and test JDKs, supply their Maven
+toolchain metadata with `jdkToolchains`:
+
+```nix
+project = pkgs.maven-purifier.buildMavenProject {
+  src = ./.;
+  jdkToolchains = [
+    {
+      jdk = pkgs.temurin-bin-27;
+      provides = { version = "27"; vendor = "temurin"; };
+    }
+    {
+      jdk = pkgs.temurin-bin-21;
+      provides = { version = "21"; vendor = "temurin"; };
+    }
+  ];
+};
+```
+
+Each `provides` value is a string matching the project's native Maven
+toolchain requirements; `version` is required. The JDK that runs Maven is
+selected by `jdk` as usual. Run capture with the project's native SDK setup,
+then configure the corresponding Nix JDKs for replay. The builder passes a
+standard toolchains XML file to Maven and includes those SDKs in its Nix
+closure.
+
+To use that same SDK configuration in the developer launcher, expose
+`project.prefetch` as a flake package (for example, `maven-prefetch`), then
+run these commands at the Maven build root:
+
+```sh
+nix build '.#maven-prefetch'
+maven-purifier prefetch --prefetched ./result
+.maven-purifier/bin/mvn clean install
+```
+
+Use the configured project's prefetch output when supplying builder options.
+The generated launcher and IDE Maven configuration then select the same
+toolchains. Prefetching an output without toolchains removes the previous
+generated toolchain binding.
+
 To use another purified JVM package without downloading its artifacts:
 
 ```zsh

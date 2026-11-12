@@ -30,6 +30,70 @@ let
   # local metadata, and must not be mistaken for a missing download.
   bundle = build { src = ./fixtures/bundle; };
 
+  toolchainJdk17 = pkgs.javaPackages.compiler.openjdk17.headless;
+  toolchainJdk21 = pkgs.temurin-bin-21;
+  toolchainProbe = build {
+    src = ./fixtures/multi;
+    jdkToolchains = [
+      {
+        jdk = toolchainJdk17;
+        provides = {
+          version = "17";
+          vendor = "A&B <vendor>";
+        };
+      }
+      {
+        jdk = toolchainJdk21;
+        provides.version = "21";
+      }
+    ];
+  };
+  invalidToolchainsRejected =
+    lib.all
+      (
+        value:
+        !((builtins.tryEval (
+          (build {
+            src = ./fixtures/multi;
+            jdkToolchains = value;
+          }).prefetch.drvPath
+        )).success
+        )
+      )
+      [
+        "not-a-list"
+        [
+          {
+            jdk = toolchainJdk17;
+            provides.version = 17;
+          }
+        ]
+        [
+          {
+            jdk = toolchainJdk17;
+            provides = {
+              version = "17";
+              "bad<tag" = "x";
+            };
+          }
+        ]
+      ];
+  toolchainCheck =
+    assert invalidToolchainsRejected;
+    pkgs.runCommand "maven-jdk-toolchains" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+      python3 - ${toolchainProbe.prefetch}/toolchains.xml ${toolchainJdk17.home} ${toolchainJdk21.home} <<'PYTHON'
+      import sys, xml.etree.ElementTree as ET
+      root = ET.parse(sys.argv[1]).getroot()
+      chains = root.findall('toolchain')
+      assert len(chains) == 2
+      assert [c.findtext('type') for c in chains] == ['jdk', 'jdk']
+      assert [c.findtext('provides/version') for c in chains] == ['17', '21']
+      assert chains[0].findtext('provides/vendor') == 'A&B <vendor>'
+      assert [c.findtext('configuration/jdkHome') for c in chains] == sys.argv[2:]
+      PYTHON
+      touch $out
+    '';
+
   # The lock names the artifacts of each package, so a consumer reaches
   # them without building first. app runs from the jars of the packages
   # and the locked commons-lang3.
@@ -349,7 +413,7 @@ let
         MAVEN_PURIFIER_CLI = "${../cli}/maven_purifier.py";
       }
       ''
-        python3 ${./cli/test_maven_purifier.py}
+        python3 -B -m unittest discover -s ${./cli} -p 'test_*.py'
         python3 -B -m unittest discover -s ${./real-world} -p 'test_*.py'
         touch $out
       '';
@@ -448,6 +512,7 @@ in
   multi-core = multi.packages.core;
   multi-tests = multi.tests;
   bundle-release = bundle.packages.bundle;
+  jdk-toolchains = toolchainCheck;
   online-goal = pkgs.runCommand "maven-purifier-online-goal" { } ''
     bom=${onlineGoal.packages.online-goal.artifacts."online-goal-cyclonedx.json"}
     grep -q 'commons-lang3' "$bom"
