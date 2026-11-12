@@ -1,16 +1,17 @@
 # Dedicated native proof; each corrected head/retry needs separate authorization.
-name: Log4j native Docker proof
+name: Log4j native Maven offline proof
 on:
   pull_request:
     types: [opened, synchronize]
     paths:
       - '.github/workflows/log4j-native-proof.yml'
-      - 'tests/real-world/log4j-native-proof.py'
-      - 'docs/development/log4j-native-proof.md'
+      - 'tests/real-world/log4j-native-offline-proof.py'
+      - 'docs/development/log4j-native-offline-proof.md'
 permissions:
   contents: read
+  actions: read
 jobs:
-  log4j-native:
+  log4j-native-offline:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -37,30 +38,37 @@ jobs:
           sha256sum flake.lock > "$RUNNER_TEMP/log4j-flake-lock-before.txt"
           nix flake metadata --no-write-lock-file --json . > "$RUNNER_TEMP/log4j-source.json"
           source=$(python3 -c 'import json,os; d=json.load(open(os.environ["RUNNER_TEMP"]+"/log4j-source.json")); assert d["revision"]=="301ee83db0a6ddde7d4ea4f385fa8d33ee4af5be"; assert d["locked"]["narHash"]=="sha256-rB8d3s58bog0Q436qLdx9+oe3wrgNjjiUtB8+xbYluM="; print(d["path"])')
-          timeout --kill-after=15s 600s nix build --no-write-lock-file "git+file://$PWD?rev=301ee83db0a6ddde7d4ea4f385fa8d33ee4af5be&shallow=1#cli" --json --out-link "$RUNNER_TEMP/log4j-cli" --max-jobs 1 --cores 2 > "$RUNNER_TEMP/log4j-build.json"
+          timeout --kill-after=15s 300s nix build --no-write-lock-file "git+file://$PWD?rev=301ee83db0a6ddde7d4ea4f385fa8d33ee4af5be&shallow=1#cli" --json --out-link "$RUNNER_TEMP/log4j-cli" --max-jobs 1 --cores 2 > "$RUNNER_TEMP/log4j-build.json"
           sha256sum --check "$RUNNER_TEMP/log4j-flake-lock-before.txt"
           git diff --exit-code HEAD --
       - name: Select upstream's explicit SDK17 family
         uses: actions/setup-java@2dfa2011c5b2a0f1489bf9e433881c92c1631f88
         with:
           distribution: zulu
-          java-version: '17'
-      - name: Actual full-reactor native capture with upstream Docker profiles
+          java-version: '17.0.21'
+          architecture: x64
+      - name: Fetch the exact validated native artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: timeout --kill-after=15s 120s python3 tests/real-world/log4j-native-offline-proof.py fetch "$RUNNER_TEMP/log4j-offline-evidence"
+      - name: Prefetch and replay full native install with cached pinned services
         env:
           CI: 'true'
           PURIFIER_SOURCE: ${{ github.workspace }}/.log4j-capture-source
-        run: python3 tests/real-world/log4j-native-proof.py "$RUNNER_TEMP/log4j-cli/bin/maven-purifier" "$RUNNER_TEMP/log4j-native-evidence"
-      - name: Preserve native evidence even on failure
+        run: timeout --kill-after=15s 2160s python3 tests/real-world/log4j-native-offline-proof.py run "$RUNNER_TEMP/log4j-cli/bin/maven-purifier" "$RUNNER_TEMP/log4j-offline-evidence"
+      - name: Preserve native Maven offline evidence even on failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: log4j-native-${{ github.run_id }}-${{ github.run_attempt }}
+          name: log4j-native-offline-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 3
           if-no-files-found: warn
           path: |
-            ${{ runner.temp }}/log4j-native-evidence/*.log
-            ${{ runner.temp }}/log4j-native-evidence/receipt.json
-            ${{ runner.temp }}/log4j-native-evidence/maven-purifier.lock.json
+            ${{ runner.temp }}/log4j-offline-evidence/*.log
+            ${{ runner.temp }}/log4j-offline-evidence/*.json
+            ${{ runner.temp }}/log4j-offline-evidence/*.jsonl
+            ${{ runner.temp }}/log4j-offline-evidence/offline-launcher.sh
+            ${{ runner.temp }}/log4j-offline-evidence/offline-settings.xml
             ${{ runner.temp }}/log4j-build.json
             ${{ runner.temp }}/log4j-source.json
             ${{ runner.temp }}/log4j-purifier-sha.txt
