@@ -255,7 +255,7 @@ class DefinitionHash(TemporaryTree):
         self.assertNotEqual(mp.definition_hash(self.root, ["install"]), before)
 
     def test_known_value(self):
-        # The text it hashes, which nix/lib/definition-hash.nix builds too.
+        # The text it hashes, which lib-overlays/default/definition-hash.nix builds too.
         import hashlib
 
         def h(text):

@@ -13,11 +13,8 @@ Extends the workspace `docs/development/tech-defaults.md`.
   library only, run by nixpkgs' Python through the wrapper that
   `pkgs/cli` makes. It calls `nix store prefetch-file`, `nix-build`,
   `nix-instantiate` and `nix-store` from the user's Nix installation.
-- **The Nix library** (`nix/lib/`) needs only `pkgs` from its caller.
-  `read-lock.nix`, `fetch.nix` and `realize.nix` need no nixpkgs at all,
-  since `maven-purifier mvn` evaluates them with plain `nix-build`.
-  `read-lock.nix`, `fetch.nix`, `tree.nix` and `realize.nix` have the shape
-  of the shared nix-purifiers/purifier library, and move to it once that
-  library is published.
-- **caisson** for the flake, as in the other workspace projects and in
-  sbt-nix-backend.
+- **The library overlay** (`lib-overlays/default/`) provides the lock reader
+  and its pure Nix helpers.
+- **The project builder** (`pkgs/build-maven-project/`) builds locked Maven
+  projects. Its private Python helpers live beside the builder that runs them.
+- **caisson** composes the flake, library overlays and package sets.

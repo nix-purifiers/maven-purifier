@@ -169,7 +169,7 @@ The builder also takes `fetchers` (a company mirror or credentials go into
 `fetchers.fetchurl`), `lockFile` (a lockfile outside `src`), `jdk` (the
 default is nixpkgs' headless JDK of the Java major version the lock was made
 with), `mavenFlags`, `srcFilter` and `checkDefinition`;
-`nix/lib/build-maven-project.nix` documents them.
+`pkgs/build-maven-project/default.nix` documents them.
 `maven-purifier.buildMavenProject.override` replaces the packages the
 builder takes, such as `javaPackages` or `stdenvNoCC`, and
 `maven-purifier.overrideScope` replaces what the scope shares, such as

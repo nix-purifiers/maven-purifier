@@ -41,7 +41,6 @@ let
       ../../lib-overlays
       ../../pkg-overlays
       ../../pkgs
-      ../../nix
       ../../cli
       ../../extension
       ../../tests
