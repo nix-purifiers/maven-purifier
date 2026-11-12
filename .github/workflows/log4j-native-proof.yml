@@ -1,0 +1,66 @@
+# One opened-PR native proof; later heads/retries need a separately authorized run.
+name: Log4j native Docker proof
+on:
+  pull_request:
+    types: [opened]
+    paths:
+      - '.github/workflows/log4j-native-proof.yml'
+      - 'tests/real-world/log4j-native-proof.py'
+permissions:
+  contents: read
+jobs:
+  log4j-native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+        with:
+          extra_nix_config: |
+            sandbox = true
+      - name: Checkout immutable public purifier used by the native capture
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: nix-purifiers/maven-purifier
+          ref: 301ee83db0a6ddde7d4ea4f385fa8d33ee4af5be
+          path: .log4j-capture-source
+          persist-credentials: false
+      - name: Verify pristine purifier checkout before building
+        run: git diff --exit-code HEAD --
+      - name: Freeze approved public source and build its native capture command
+        working-directory: .log4j-capture-source
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/log4j-purifier-sha.txt"
+          sha256sum flake.lock > "$RUNNER_TEMP/log4j-flake-lock-before.txt"
+          nix flake metadata --no-write-lock-file --json . > "$RUNNER_TEMP/log4j-source.json"
+          source=$(python3 -c 'import json,os; d=json.load(open(os.environ["RUNNER_TEMP"]+"/log4j-source.json")); assert d["revision"]=="301ee83db0a6ddde7d4ea4f385fa8d33ee4af5be"; assert d["locked"]["narHash"]=="sha256-rB8d3s58bog0Q436qLdx9+oe3wrgNjjiUtB8+xbYluM="; print(d["path"])')
+          timeout --kill-after=15s 600s nix build --no-write-lock-file "$source#cli" --json --out-link "$RUNNER_TEMP/log4j-cli" --max-jobs 1 --cores 2 > "$RUNNER_TEMP/log4j-build.json"
+          sha256sum --check "$RUNNER_TEMP/log4j-flake-lock-before.txt"
+          git diff --exit-code HEAD --
+      - name: Select upstream's explicit SDK17 family
+        uses: actions/setup-java@2dfa2011c5b2a0f1489bf9e433881c92c1631f88
+        with:
+          distribution: zulu
+          java-version: '17'
+      - name: Actual full-reactor native capture with upstream Docker profiles
+        env:
+          CI: 'true'
+          PURIFIER_SOURCE: ${{ github.workspace }}/.log4j-capture-source
+        run: python3 tests/real-world/log4j-native-proof.py "$RUNNER_TEMP/log4j-cli/bin/maven-purifier" "$RUNNER_TEMP/log4j-native-evidence"
+      - name: Preserve native evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: log4j-native-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 3
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/log4j-native-evidence/*.log
+            ${{ runner.temp }}/log4j-native-evidence/receipt.json
+            ${{ runner.temp }}/log4j-native-evidence/maven-purifier.lock.json
+            ${{ runner.temp }}/log4j-build.json
+            ${{ runner.temp }}/log4j-source.json
+            ${{ runner.temp }}/log4j-purifier-sha.txt
+            ${{ runner.temp }}/log4j-flake-lock-before.txt
