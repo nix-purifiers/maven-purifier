@@ -80,6 +80,11 @@ jobs:
         run: bash tests/native-platform.sh
       - name: Build the command
         run: nix build --out-link "$RUNNER_TEMP/cli" '.#cli'
+      - name: Provide the Java 21 caller runtime recorded by the fixture locks
+        run: |
+          nix build --inputs-from . 'nixpkgs#jdk21_headless' --out-link "$RUNNER_TEMP/fixture-jdk"
+          echo "JAVA_HOME=$RUNNER_TEMP/fixture-jdk" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/fixture-jdk/bin/java" -version
       - name: Relock copies of fixtures, which must reproduce their lockfiles byte for byte
         run: |
           # An empty home, so that no settings of the runner take part.
@@ -169,6 +174,11 @@ jobs:
           nix build --out-link "$RUNNER_TEMP/cli" '.#cli'
           nix build --out-link "$RUNNER_TEMP/jdtls" 'nixpkgs#jdt-language-server'
           nix build --out-link "$RUNNER_TEMP/python" 'nixpkgs#python3'
+      - name: Provide the Java 21 caller runtime recorded by the fixture locks
+        run: |
+          nix build --inputs-from . 'nixpkgs#jdk21_headless' --out-link "$RUNNER_TEMP/fixture-jdk"
+          echo "JAVA_HOME=$RUNNER_TEMP/fixture-jdk" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/fixture-jdk/bin/java" -version
       - name: Prefetch a copy of the multi fixture
         run: |
           cp -r tests/fixtures/multi "$RUNNER_TEMP/multi"
