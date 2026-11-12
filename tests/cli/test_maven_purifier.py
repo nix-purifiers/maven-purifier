@@ -121,6 +121,34 @@ class GeneratedObr(TemporaryTree):
             self.assertFalse(mp.generated_obr_index(path, self.root, set()))
 
 
+class LocalPrefetchState(TemporaryTree):
+    def test_projects_get_distinct_stable_owned_directories_outside_source(self):
+        first = self.root / "one"
+        second = self.root / "two"
+        first.mkdir()
+        second.mkdir()
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.root / "user state")}):
+            state = mp.local_prefetch_state(first)
+            self.assertEqual(state, mp.local_prefetch_state(first / "."))
+            self.assertNotEqual(state, mp.local_prefetch_state(second))
+        self.assertFalse(state.is_relative_to(first))
+        self.assertEqual(state.stat().st_mode & 0o777, 0o700)
+
+    def test_project_local_state_and_symlinked_managed_state_are_rejected(self):
+        project = self.root / "project"
+        project.mkdir()
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(project / "state")}):
+            with self.assertRaises(SystemExit):
+                mp.local_prefetch_state(project)
+        base = self.root / "state"
+        base.mkdir()
+        (base / "maven-purifier").symlink_to(project)
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(base)}):
+            with self.assertRaises(SystemExit):
+                mp.local_prefetch_state(project)
+        self.assertEqual(list(project.iterdir()), [])
+
+
 class PrefetchedToolchains(TemporaryTree):
     def test_native_launcher_passes_configured_toolchains_as_one_path_argument(self):
         prefetched = self.root / "prefetched SDKs"
@@ -133,17 +161,29 @@ class PrefetchedToolchains(TemporaryTree):
         lock = {"javaMajor": "21", "maven": {"version": "3.9.11"}}
         def settings(_lock, _repo, target):
             target.write_text("<settings/>")
+        state = self.root / mp.STATE_DIR
+        state.mkdir()
+        (state / "prefetch").symlink_to(prefetched)
+        (state / "jdk").symlink_to(prefetched / "jdk")
         with mock.patch.object(mp, "build_root", return_value=self.root), \
              mock.patch.object(mp, "java_home", return_value="/existing/host-java"), \
              mock.patch.object(mp, "read_lock", return_value=lock), \
              mock.patch.object(mp, "check_fresh"), \
              mock.patch.object(mp, "offline_settings", side_effect=settings), \
+             mock.patch.object(mp, "local_prefetch_state", return_value=self.root / "external-state"), \
              mock.patch.dict(os.environ, {"MAVEN_PURIFIER_EXTENSION": "/recording-extension.jar"}):
+            (self.root / "external-state").mkdir()
             mp.prefetch(["--prefetched", str(prefetched)])
+            with mock.patch.object(mp, "nix_build", return_value=str(prefetched)) as build:
+                mp.prefetch([])
+                self.assertEqual(build.call_args.args[-1], self.root / "external-state/prefetch")
         state = self.root / mp.STATE_DIR
         argv = json.loads(subprocess.check_output([str(state / "bin/mvn"), "verify"], text=True))
         self.assertEqual(argv[-3:], ["--toolchains", str(state / "toolchains.xml"), "verify"])
         self.assertIn(f"--toolchains={state / 'toolchains.xml'}", (self.root / ".mvn/maven.config").read_text())
+        self.assertFalse((state / "jdk").is_symlink())
+        self.assertFalse((state / "prefetch").is_symlink())
+        self.assertEqual((self.root / "external-state/jdk").readlink(), Path("/existing/host-java"))
 
     def test_links_the_sdk_configuration_without_copying_store_paths_into_source(self):
         prefetched = self.root / "prefetched"

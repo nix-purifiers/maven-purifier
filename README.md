@@ -313,8 +313,13 @@ out; delete them to resolve online again.
 The lines also load maven-purifier's extension, which warns when a Maven of
 another version runs: its default plugin versions differ from the locked
 ones. The locked Maven is `.maven-purifier/bin/mvn`.
-`.maven-purifier/jdk` points to the existing local runtime observed during
-prefetch; the launcher continues to honor your runtime environment. Put
+The prefetch GC root and an alias to the runtime observed during prefetch
+live under `$XDG_STATE_HOME/maven-purifier/projects/` (default
+`~/.local/state/maven-purifier/projects/`), keyed by the absolute project
+path. Prefetch prints the directory; retain it to keep the downloads rooted
+against Nix garbage collection. Directory aliases stay outside the project
+so native source-tree walks see ordinary directories. The launcher continues
+to honor your runtime environment. Put
 `.maven-purifier/bin` on `PATH`, or use a Maven wrapper that names the
 locked version.
 
@@ -450,12 +455,11 @@ maven-purifier prefetch
 ```
 
 Commit `maven-purifier.lock.json`. The locked Maven now builds and tests
-Gson offline on the locked JDK, and an editor that reads
+Gson offline with your existing Java runtime, and an editor that reads
 `.maven-purifier/settings.xml` imports it offline:
 
 ```zsh
-JAVA_HOME=$PWD/.maven-purifier/jdk .maven-purifier/bin/mvn \
-  clean install
+.maven-purifier/bin/mvn clean install
 ```
 
 From the same directory, Nix builds the `gson` module with this command:
