@@ -1,4 +1,4 @@
-io.github.nixpurifiers.maven.RecordingEventSpy
+io.github.nixpurifiers.maven.CompatibleEventSpy
 io.github.nixpurifiers.maven.ProjectedModelProcessor
 io.github.nixpurifiers.maven.ProjectedLifecycleParticipant
 io.github.nixpurifiers.maven.LockedReplayParticipant

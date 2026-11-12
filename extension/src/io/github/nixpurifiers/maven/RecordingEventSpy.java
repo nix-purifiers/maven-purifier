@@ -11,8 +11,6 @@ import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
-import javax.inject.Named;
-import javax.inject.Singleton;
 import org.apache.maven.eventspy.AbstractEventSpy;
 import org.apache.maven.execution.MavenExecutionResult;
 import org.eclipse.aether.RepositoryEvent;
@@ -46,8 +44,6 @@ import org.eclipse.aether.repository.RemoteRepository;
  * locked ones, and when the build fails after files could not be resolved offline, it names them
  * and the commands that add them.
  */
-@Named("maven-purifier")
-@Singleton
 public class RecordingEventSpy extends AbstractEventSpy {
 
   private Writer out;
