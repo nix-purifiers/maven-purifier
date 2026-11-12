@@ -134,6 +134,7 @@ class PrefetchedToolchains(TemporaryTree):
         def settings(_lock, _repo, target):
             target.write_text("<settings/>")
         with mock.patch.object(mp, "build_root", return_value=self.root), \
+             mock.patch.object(mp, "java_home", return_value="/existing/host-java"), \
              mock.patch.object(mp, "read_lock", return_value=lock), \
              mock.patch.object(mp, "check_fresh"), \
              mock.patch.object(mp, "offline_settings", side_effect=settings), \
