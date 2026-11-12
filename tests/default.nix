@@ -26,6 +26,10 @@ let
 
   onlineGoal = build { src = ./fixtures/online-goal; };
 
+  # Felix writes repository.xml while installing bundles. It is generated
+  # local metadata, and must not be mistaken for a missing download.
+  bundle = build { src = ./fixtures/bundle; };
+
   # The lock names the artifacts of each package, so a consumer reaches
   # them without building first. app runs from the jars of the packages
   # and the locked commons-lang3.
@@ -339,6 +343,7 @@ let
       }
       ''
         python3 ${./cli/test_maven_purifier.py}
+        python3 -B -m unittest discover -s ${./real-world} -p 'test_*.py'
         touch $out
       '';
 
@@ -430,6 +435,7 @@ in
   multi-app = multi.packages.app;
   multi-core = multi.packages.core;
   multi-tests = multi.tests;
+  bundle-release = bundle.packages.bundle;
   online-goal = pkgs.runCommand "maven-purifier-online-goal" { } ''
     bom=${onlineGoal.packages.online-goal.artifacts."online-goal-cyclonedx.json"}
     grep -q 'commons-lang3' "$bom"

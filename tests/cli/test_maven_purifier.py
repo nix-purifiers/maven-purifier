@@ -92,6 +92,32 @@ class DownloadPath(unittest.TestCase):
         self.assertEqual(mp.download_path("https://example.org/dist/maven.zip"), "downloads/example.org/dist/maven.zip")
 
 
+class GeneratedObr(TemporaryTree):
+    def index(self, uri):
+        return self.write("repository.xml", '<repository><resource uri="' + uri + '"/></repository>')
+
+    def test_installed_bundle_index_is_generated(self):
+        artifact = self.write("example/bundle/1/bundle-1.jar", "jar")
+        index = self.index(artifact.as_uri())
+        self.assertTrue(mp.generated_obr_index(index, self.root, {"example/bundle/1/bundle-1.jar"}))
+
+    def test_relative_installed_bundle_uri(self):
+        self.write("example/bundle/1/bundle-1.jar", "jar")
+        self.assertTrue(mp.generated_obr_index(self.index("example/bundle/1/bundle-1.jar"), self.root,
+                                               {"example/bundle/1/bundle-1.jar"}))
+
+    def test_download_and_external_uri_are_not_generated(self):
+        for uri in ("example/download/1/download-1.jar", "https://example.org/bundle.jar",
+                    "../outside.jar", "file:///outside.jar"):
+            self.assertFalse(mp.generated_obr_index(self.index(uri), self.root, set()))
+
+    def test_name_alone_does_not_exempt_an_unrecorded_file(self):
+        for text in ("not XML", "<repository/>", "<other/>",
+                     '<repository><referral url="https://example.org/"/></repository>'):
+            path = self.write("repository.xml", text)
+            self.assertFalse(mp.generated_obr_index(path, self.root, set()))
+
+
 class TrackedRepository(TemporaryTree):
     def test_resolver_2_key_with_digest(self):
         self.write(

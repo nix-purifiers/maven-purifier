@@ -90,6 +90,9 @@ jobs:
           cp -r tests/fixtures/external "$RUNNER_TEMP/external"
           (cd "$RUNNER_TEMP/external/src" && HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/cli/bin/maven-purifier" lock --force --lockfile ../maven-purifier.lock.json)
           diff -u tests/fixtures/external/maven-purifier.lock.json "$RUNNER_TEMP/external/maven-purifier.lock.json"
+          cp -r tests/fixtures/bundle "$RUNNER_TEMP/bundle"
+          (cd "$RUNNER_TEMP/bundle" && HOME="$RUNNER_TEMP/home" "$RUNNER_TEMP/cli/bin/maven-purifier" lock --force)
+          diff -u tests/fixtures/bundle/maven-purifier.lock.json "$RUNNER_TEMP/bundle/maven-purifier.lock.json"
       - name: Lock, relock, prefetch and test Gson with ordinary Maven
         run: |
           git clone --quiet https://github.com/google/gson "$RUNNER_TEMP/gson"
