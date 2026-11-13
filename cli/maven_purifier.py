@@ -689,9 +689,24 @@ def read_record(path):
         with source.open() as f:
             events.extend(json.loads(line) for line in f if line.strip())
     for event in events:
+        if event.get("event") == "record-error":
+            fail(f"cannot record Maven repository inputs: {event.get('message')}")
         if event.get("event") == "download-error":
             fail(f"cannot preserve downloaded bytes of {event.get('url')}: {event.get('message')}")
     return events
+
+
+def repository_path(event, primary):
+    """A resolver file belongs to its event's session, including child Maven."""
+    repository = Path(event.get("localRepository", primary))
+    file = Path(event["file"])
+    if not repository.is_absolute() or not file.is_absolute():
+        fail(f"repository event paths must be absolute: {event}")
+    repository = Path(os.path.abspath(repository))
+    file = Path(os.path.abspath(file))
+    if not file.is_relative_to(repository):
+        fail(f"repository event file is outside its local repository: {file}")
+    return file.relative_to(repository).as_posix()
 
 
 def download_source(event, record):
@@ -703,6 +718,52 @@ def download_source(event, record):
     if not source.is_absolute() or not source.resolve().is_relative_to(owned) or not source.is_file():
         fail(f"invalid download snapshot for {event.get('url')}: {source}")
     return source
+
+
+def captured_downloads(events, repo, record, provided_sources, build_events):
+    """Join isolated resolver inputs; one lock path cannot hold conflicting bytes."""
+    downloads = {}
+    download_sources = {}
+    development_paths = set()
+    roots = {}
+    repository_urls = {}
+    for index, e in enumerate(events):
+        if e["event"] != "download":
+            continue
+        rel = repository_path(e, repo)
+        if rel in provided_sources:
+            if sri(download_source(e, record)) != sri(provided_sources[rel]):
+                fail(f"downloaded input conflicts with the Nix-provided repository file: {rel}")
+            continue
+        found = [rel]
+        # Maven Resolver stores a timestamped SNAPSHOT under its base
+        # version, which the event names, and also under the name it has
+        # in the remote repository. Both copies are the same file.
+        remote_name = e["url"].rsplit("/", 1)[-1]
+        sibling = Path(rel).parent / remote_name
+        if remote_name != Path(rel).name and Path(e["file"]).with_name(remote_name).is_file():
+            found.append(sibling.as_posix())
+        event_root = Path(os.path.abspath(e.get("localRepository", repo)))
+        source = download_source(e, record)
+        for path in found:
+            if path in downloads:
+                identical = sri(source) == sri(download_sources[path])
+                if roots[path] != event_root and not identical:
+                    fail(f"conflicting downloaded bytes in separate Maven repositories: {path}")
+                if identical and e["url"] < downloads[path]:
+                    downloads[path] = e["url"]
+                    download_sources[path] = source
+            else:
+                downloads[path] = e["url"]
+                download_sources[path] = source
+                roots[path] = event_root
+                if index >= build_events:
+                    development_paths.add(path)
+        # Unobserved core-extension fallback below scans only the primary
+        # repository. A child may reuse a repository id for another URL.
+        if Path(os.path.abspath(e.get("localRepository", repo))) == repo:
+            repository_urls.setdefault(e["repository"], e["repositoryUrl"])
+    return downloads, download_sources, development_paths, repository_urls
 
 
 def artifact_key(install):
@@ -982,6 +1043,7 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
             shutil.copyfile(declared_store, target)
             declared.append(file_entry(Path(d["path"]).as_posix(), d["url"], declared_hash))
         provided_paths = set()
+        provided_sources = {}
         if inputs:
             import project_inputs
             import jvm_repository
@@ -992,8 +1054,11 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
                 # Catalogs discover native coordinates; Nix identifies their
                 # provider. No caller-supplied version rewrites are involved.
                 jvm_repository.merge(view["repository"], repo)
-                provided_paths.update(path.relative_to(view["repository"]).as_posix()
-                                      for path in view["repository"].rglob("*") if path.is_file())
+                for path in view["repository"].rglob("*"):
+                    if path.is_file():
+                        relative = path.relative_to(view["repository"]).as_posix()
+                        provided_paths.add(relative)
+                        provided_sources[relative] = path
                 for module in json.loads(view["catalog"].read_text())["modules"]:
                     key = module["group"] + ":" + module["name"]
                     if key in selections and selections[key] != module["version"]:
@@ -1061,34 +1126,12 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
                 info(f"the development pass with Maven {editor_maven} failed; the editor may miss plugins offline")
 
         events = read_record(record) if record.exists() else []
-        downloads = {}
-        download_sources = {}
-        development_paths = set()
-        repository_urls = {}
-        for index, e in enumerate(events):
-            if e["event"] != "download":
-                continue
-            rel = Path(e["file"]).relative_to(repo).as_posix()
-            if rel in provided_paths:
-                continue
-            found = [rel]
-            # Maven Resolver stores a timestamped SNAPSHOT under its base
-            # version, which the event names, and also under the name it has
-            # in the remote repository. Both copies are the same file.
-            remote_name = e["url"].rsplit("/", 1)[-1]
-            sibling = Path(rel).parent / remote_name
-            if remote_name != Path(rel).name and (repo / sibling).is_file():
-                found.append(sibling.as_posix())
-            for path in found:
-                if path not in downloads:
-                    downloads[path] = e["url"]
-                    download_sources[path] = download_source(e, record)
-                    if index >= build_events:
-                        development_paths.add(path)
-            repository_urls.setdefault(e["repository"], e["repositoryUrl"])
+        downloads, download_sources, development_paths, repository_urls = captured_downloads(
+            events, repo, record, provided_sources, build_events)
 
         # A seeded metadata file stays in the lock while the build reads it.
-        read_metadata = {Path(e["file"]).relative_to(repo).as_posix() for e in events if e["event"] == "resolved"}
+        read_metadata = {repository_path(e, repo) for e in events if e["event"] == "resolved"
+                         and Path(os.path.abspath(e.get("localRepository", repo))) == repo}
         for path in sorted(seeded):
             if path in read_metadata and path not in downloads and (repo / path).is_file():
                 downloads[path] = None

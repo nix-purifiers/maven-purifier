@@ -768,6 +768,71 @@ class PrimaryPublications(TemporaryTree):
 
 
 class DownloadSnapshots(TemporaryTree):
+    def transfer(self, repository, contents, origin="https://origin.example/"):
+        relative = "example/input/1/input-1.jar"
+        file = self.write(repository + "/" + relative, contents)
+        snapshot = self.write("record.jsonl.downloads/" + repository.replace("/", "-") + ".bin", contents)
+        return {"event": "download", "file": str(file), "localRepository": str(self.root / repository),
+                "snapshot": str(snapshot), "repository": "shared-id", "repositoryUrl": origin,
+                "url": origin + relative}
+
+    def test_conflicting_child_repository_inputs_cannot_share_one_lock_path(self):
+        first = self.transfer("child-a", "first input")
+        second = self.transfer("child-b", "different input")
+        for events in [[first, second], [second, first]]:
+            with self.assertRaises(SystemExit):
+                mp.captured_downloads(events, self.root / "primary", self.root / "record.jsonl", set(), 2)
+
+    def test_identical_child_inputs_have_order_independent_origin_and_build_scope(self):
+        first = self.transfer("child-a", "same input", "https://z.example/")
+        second = self.transfer("child-b", "same input", "https://a.example/")
+        for events in [[first, second], [second, first]]:
+            downloads, sources, development, origins = mp.captured_downloads(
+                events, self.root / "primary", self.root / "record.jsonl", set(), 1)
+            relative = "example/input/1/input-1.jar"
+            self.assertEqual(downloads[relative], second["url"])
+            self.assertEqual(sources[relative].read_text(), "same input")
+            self.assertEqual(development, set())
+            self.assertEqual(origins, {})
+
+    def test_child_repository_id_does_not_supply_primary_bootstrap_origin(self):
+        child = self.transfer("child", "same input", "https://child.example/")
+        parent = self.transfer("primary", "same input", "https://parent.example/")
+        *_, origins = mp.captured_downloads(
+            [child, parent], self.root / "primary", self.root / "record.jsonl", set(), 2)
+        self.assertEqual(origins, {"shared-id": "https://parent.example/"})
+
+    def test_child_input_cannot_replace_a_different_nix_provider(self):
+        child = self.transfer("child", "different child bytes")
+        relative = "example/input/1/input-1.jar"
+        self.write("primary/" + relative, "Nix-provided bytes")
+        with self.assertRaises(SystemExit):
+            mp.captured_downloads([child], self.root / "primary", self.root / "record.jsonl",
+                                 {relative: self.root / "primary" / relative}, 1)
+
+    def test_provider_identity_uses_immutable_source_after_reactor_overwrite(self):
+        child = self.transfer("child", "Nix-provided bytes")
+        relative = "example/input/1/input-1.jar"
+        provider = self.write("provider/" + relative, "Nix-provided bytes")
+        self.write("primary/" + relative, "locally installed output")
+        downloads, *_ = mp.captured_downloads(
+            [child], self.root / "primary", self.root / "record.jsonl", {relative: provider}, 1)
+        self.assertEqual(downloads, {})
+
+    def test_child_file_is_relative_to_its_own_resolver_repository(self):
+        primary = self.root / "primary"
+        child = self.root / "project/target/child-repository"
+        relative = "example/input/1/input-1.jar"
+        event = {"file": str(child / relative), "localRepository": str(child)}
+        self.assertEqual(mp.repository_path(event, primary), relative)
+        self.assertEqual(mp.repository_path({"file": str(primary / relative)}, primary), relative)
+
+    def test_event_repository_cannot_claim_an_outside_file(self):
+        primary = self.root / "primary"
+        for file in [str(primary / "../foreign/input.jar"), "relative/input.jar"]:
+            with self.assertRaises(SystemExit):
+                mp.repository_path({"file": file, "localRepository": str(primary)}, primary)
+
     def test_child_records_keep_build_prefix_when_development_is_added(self):
         record = self.write("record.jsonl", '{"event":"parent"}\n')
         self.write("record.jsonl.parts/build/record-b.jsonl", '{"event":"child-b"}\n')

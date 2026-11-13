@@ -45,6 +45,9 @@ public final class RecordingEventSpyTest {
     RemoteRepository remote = new RemoteRepository.Builder("origin", "default", "https://example.org/repo").build();
     DefaultArtifact coordinate = new DefaultArtifact("example:same:jar:tests:1");
     DefaultRepositorySystemSession session = new DefaultRepositorySystemSession();
+    session.setLocalRepositoryManager(
+        new org.eclipse.aether.internal.impl.SimpleLocalRepositoryManagerFactory().newInstance(
+            session, new org.eclipse.aether.repository.LocalRepository(root.toFile())));
     spy.onEvent(new RepositoryEvent.Builder(session, RepositoryEvent.EventType.ARTIFACT_DOWNLOADED)
         .setArtifact(coordinate).setRepository(remote).setFile(artifact.toFile()).build());
     List<Path> copies;
@@ -60,6 +63,19 @@ public final class RecordingEventSpyTest {
         || !output.toString().contains("https://example.org/repo/example/same/1/same-1-tests.jar")
         || !output.toString().contains("\"event\":\"install\"")) {
       throw new AssertionError("remote input and local install must remain distinct observations");
+    }
+    if (!output.toString().contains("\"localRepository\":" + DocumentationCapture.json(root.toString()))) {
+      throw new AssertionError("capture must name the actual resolver session repository");
+    }
+    Path staged = root.resolve("staging");
+    Files.createDirectories(staged);
+    Path stagedArtifact = staged.resolve("same-tests.jar");
+    Files.copy(artifact, stagedArtifact);
+    spy.onEvent(new RepositoryEvent.Builder(session, RepositoryEvent.EventType.ARTIFACT_INSTALLED)
+        .setArtifact(coordinate).setFile(stagedArtifact.toFile())
+        .setRepository(new org.eclipse.aether.repository.LocalRepository(staged.toFile())).build());
+    if (!output.toString().contains("\"localRepository\":" + DocumentationCapture.json(staged.toString()))) {
+      throw new AssertionError("an explicit staging repository takes precedence over the parent session");
     }
     Path metadata = root.resolve("maven-metadata.xml");
     Files.write(metadata, "<metadata>downloaded</metadata>".getBytes(StandardCharsets.UTF_8));

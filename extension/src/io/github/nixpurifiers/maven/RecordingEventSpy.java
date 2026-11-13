@@ -89,10 +89,12 @@ public class RecordingEventSpy extends AbstractEventSpy {
     }
   }
 
-  // Each Maven process owns its writer. Invoker children inherit the record
-  // destination, but Java's synchronized methods do not serialize JVMs.
-  // Keep the first process in the original file for runtime consumers;
-  // subsequent processes get private files grouped by capture phase.
+  // Each recorder owns its writer. Maven can initialize multiple spies, and
+  // Invoker children inherit the record destination; synchronized methods do
+  // not serialize either independent instances or JVMs. Keep the first
+  // recorder in the original file; subsequent instances get private files
+  // grouped by capture phase. The separate runtime recorder goal still
+  // appends its root-project runtime events to the original file.
   static Path recordFile(Path record, String phase) throws IOException {
     try {
       return Files.createFile(record);
@@ -137,25 +139,30 @@ public class RecordingEventSpy extends AbstractEventSpy {
     if (e.getException() != null || e.getFile() == null) {
       return;
     }
-    switch (e.getType()) {
-      case ARTIFACT_DOWNLOADED:
-        if (remote(e.getRepository()) != null) {
-          download(remote(e.getRepository()), artifactPath(e.getArtifact()), e);
-        }
-        break;
-      case METADATA_DOWNLOADED:
-        if (remote(e.getRepository()) != null) {
-          download(remote(e.getRepository()), metadataPath(e.getMetadata()), e);
-        }
-        break;
-      case METADATA_RESOLVED:
-        resolved(e);
-        break;
-      case ARTIFACT_INSTALLED:
-        install(e.getArtifact(), e);
-        break;
-      default:
-        break;
+    try {
+      switch (e.getType()) {
+        case ARTIFACT_DOWNLOADED:
+          if (remote(e.getRepository()) != null) {
+            download(remote(e.getRepository()), artifactPath(e.getArtifact()), e);
+          }
+          break;
+        case METADATA_DOWNLOADED:
+          if (remote(e.getRepository()) != null) {
+            download(remote(e.getRepository()), metadataPath(e.getMetadata()), e);
+          }
+          break;
+        case METADATA_RESOLVED:
+          resolved(e);
+          break;
+        case ARTIFACT_INSTALLED:
+          install(e.getArtifact(), e);
+          break;
+        default:
+          break;
+      }
+    } catch (IOException error) {
+      out.write("{\"event\":\"record-error\",\"message\":" + json(error.toString()) + "}\n");
+      out.flush();
     }
   }
 
@@ -243,6 +250,7 @@ public class RecordingEventSpy extends AbstractEventSpy {
             + json(url(repository, path))
             + ",\"file\":"
             + json(e.getFile().getAbsolutePath())
+            + repositoryFields(e)
             + ",\"snapshot\":"
             + json(snapshot.toAbsolutePath().toString())
             + "}\n");
@@ -252,7 +260,8 @@ public class RecordingEventSpy extends AbstractEventSpy {
   // A metadata file the build read, whether it was downloaded now or lay in
   // the local repository already, as the metadata of the previous lock does.
   private void resolved(RepositoryEvent e) throws IOException {
-    out.write("{\"event\":\"resolved\",\"file\":" + json(e.getFile().getAbsolutePath()) + "}\n");
+    out.write("{\"event\":\"resolved\",\"file\":" + json(e.getFile().getAbsolutePath())
+        + repositoryFields(e) + "}\n");
     out.flush();
   }
 
@@ -270,8 +279,25 @@ public class RecordingEventSpy extends AbstractEventSpy {
             + json(a.getExtension())
             + ",\"file\":"
             + json(e.getFile().getAbsolutePath())
+            + repositoryFields(e)
             + "}\n");
     out.flush();
+  }
+
+  private static String repositoryFields(RepositoryEvent event) throws IOException {
+    org.eclipse.aether.repository.LocalRepository local =
+        event.getRepository() instanceof org.eclipse.aether.repository.LocalRepository
+            ? (org.eclipse.aether.repository.LocalRepository) event.getRepository()
+            : event.getSession().getLocalRepository();
+    if (local == null) {
+      throw new IOException("repository event has no local repository: " + event.getFile());
+    }
+    Path repository = local.getBasedir().toPath().toAbsolutePath().normalize();
+    Path file = event.getFile().toPath().toAbsolutePath().normalize();
+    if (!file.startsWith(repository)) {
+      throw new IOException("repository event file is outside its local repository: " + file);
+    }
+    return ",\"localRepository\":" + json(repository.toString());
   }
 
   static String url(RemoteRepository repository, String path) {
