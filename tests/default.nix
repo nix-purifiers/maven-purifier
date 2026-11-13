@@ -419,6 +419,7 @@ let
       {
         nativeBuildInputs = [ pkgs.python3 ];
         MAVEN_PURIFIER_CLI = "${../cli}/maven_purifier.py";
+        MAVEN_PURIFIER_RUNTIME_EXPORT = "${../pkgs/build-maven-project/export-runtime.py}";
       }
       ''
         python3 -B -m unittest discover -s ${./cli} -p 'test_*.py'

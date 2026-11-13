@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
@@ -21,14 +22,19 @@ public final class LegacyRecorderMojo extends AbstractMojo {
   private List<MavenProject> projects;
   private MavenProject project;
   private ArtifactRepository localRepository;
+  private boolean perProject;
 
   @Override
   public void execute() throws MojoExecutionException {
     String record = System.getenv("MAVEN_PURIFIER_RECORD");
     if (record == null) throw new MojoExecutionException("MAVEN_PURIFIER_RECORD is unset");
-    try (Writer output = Files.newBufferedWriter(Paths.get(record), StandardCharsets.UTF_8,
-        StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
-      List<MavenProject> reactor = projects;
+    if (perProject && project == null) throw new MojoExecutionException("The Maven project is unavailable");
+    StandardOpenOption[] options = perProject
+        ? new StandardOpenOption[] {StandardOpenOption.WRITE}
+        : new StandardOpenOption[] {StandardOpenOption.CREATE, StandardOpenOption.APPEND};
+    try (Writer output = Files.newBufferedWriter(recordFile(Paths.get(record), perProject),
+        StandardCharsets.UTF_8, options)) {
+      List<MavenProject> reactor = perProject ? null : projects;
       if (reactor == null || reactor.isEmpty()) {
         reactor = new ArrayList<>();
         reactor.add(project);
@@ -55,6 +61,13 @@ public final class LegacyRecorderMojo extends AbstractMojo {
     } catch (IOException error) {
       throw new MojoExecutionException("Cannot record the legacy Maven reactor", error);
     }
+  }
+
+  static Path recordFile(Path record, boolean perProject) throws IOException {
+    if (!perProject) return record;
+    Path parts = record.resolveSibling(record.getFileName() + ".parts").resolve("build");
+    Files.createDirectories(parts);
+    return Files.createTempFile(parts, "record-", ".jsonl");
   }
 
   private void runtime(Writer output, MavenProject module) throws IOException {

@@ -131,7 +131,16 @@ def seed_legacy_recorder(repo):
         target / "maven-purifier-legacy-recorder-1.jar", "w"
     ) as output:
         for entry in source.infolist():
-            if entry.filename == "META-INF/maven/plugin.xml" or (
+            if entry.filename == "META-INF/maven/plugin.xml":
+                descriptor = ET.fromstring(source.read(entry.filename))
+                mojos = descriptor.find("mojos")
+                if mojos is None:
+                    fail("the legacy recorder descriptor has no goals")
+                for mojo in list(mojos):
+                    if mojo.findtext("goal") != "record":
+                        mojos.remove(mojo)
+                output.writestr(entry, ET.tostring(descriptor, encoding="utf-8", xml_declaration=True))
+            elif (
                 entry.filename.startswith("io/github/nixpurifiers/maven/LegacyRecorderMojo")
                 and entry.filename.endswith(".class")
             ):

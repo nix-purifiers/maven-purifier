@@ -659,6 +659,25 @@ class Options(unittest.TestCase):
 
 
 class Compatibility(TemporaryTree):
+    def test_local_legacy_descriptor_excludes_the_pure_per_project_goal(self):
+        extension = self.root / "extension.jar"
+        implementation = "io.github.nixpurifiers.maven.LegacyRecorderMojo"
+        descriptor = ("<plugin><mojos><mojo><goal>record-project</goal><implementation>"
+                      + implementation + "</implementation></mojo><mojo><goal>record</goal>"
+                      "<aggregator>true</aggregator><implementation>" + implementation
+                      + "</implementation></mojo></mojos></plugin>")
+        with mp.zipfile.ZipFile(extension, "w") as archive:
+            archive.writestr("META-INF/maven/plugin.xml", descriptor)
+            archive.writestr(implementation.replace(".", "/") + ".class", b"recorder class")
+        repository = self.root / "repository"
+        with mock.patch.dict(os.environ, {"MAVEN_PURIFIER_EXTENSION": str(extension)}):
+            mp.seed_legacy_recorder(repository)
+        with mp.zipfile.ZipFile(repository / mp.LEGACY_RECORDER_PATH / "maven-purifier-legacy-recorder-1.jar") as archive:
+            mojos = ET.fromstring(archive.read("META-INF/maven/plugin.xml")).findall("./mojos/mojo")
+            self.assertEqual([m.findtext("goal") for m in mojos], ["record"])
+            self.assertEqual(mojos[0].findtext("aggregator"), "true")
+            self.assertIn(mojos[0].findtext("implementation").replace(".", "/") + ".class", archive.namelist())
+
     def test_java_versions(self):
         for version, major in [("1.8.0_504", "8"), ("17.0.20", "17"), ("26-ea", "26")]:
             self.assertEqual(mp.java_major(version), major)

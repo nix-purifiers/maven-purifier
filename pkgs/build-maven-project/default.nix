@@ -200,7 +200,7 @@ let
         javac --release 8 -Xlint:-options -d classes -cp "${arguments.maven}/maven/lib/*" LegacyRecorderMojo.java
         cp ${../../extension/resources/META-INF/maven/plugin.xml} classes/META-INF/maven/plugin.xml
         # Maven 4 populates the legacy project artifact view on demand.
-        sed -i '/<requiresProject>/a\      <requiresDependencyResolution>runtime</requiresDependencyResolution>' \
+        sed -i '/<goal>record\(-project\)\?<\/goal>/a\      <requiresDependencyResolution>runtime</requiresDependencyResolution>' \
           classes/META-INF/maven/plugin.xml
         directory=$out/io/github/nix-purifiers/maven-purifier-legacy-recorder/1
         mkdir -p "$directory"
@@ -251,6 +251,9 @@ let
     ''}
     cp -r --no-preserve=mode ${runtimeRecorder}/. "$TMPDIR/repository"
     export MAVEN_PURIFIER_RECORD="$TMPDIR/runtime-record.jsonl"
+    # Only cooperating runtime Mojos append the main file. An existing main
+    # sends every EventSpy instance to its private phase shard instead.
+    ${python3}/bin/python -c 'import os; fd = os.open(os.environ["MAVEN_PURIFIER_RECORD"], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600); os.close(fd)'
     export MAVEN_PURIFIER_CAPTURE_RUNTIME=1
     maven_failed() {
       echo "maven-purifier: Maven failed offline. If it reports an artifact that has not been downloaded, the lock does not hold everything this build needs: run \`maven-purifier lock --force\` at the build root, with the goals and -P options you build with. If it reports a compile or test failure, the build itself failed." >&2
@@ -269,7 +272,7 @@ let
           flags
           ++ mavenFlags
           ++ buildGoals
-          ++ [ "io.github.nix-purifiers:maven-purifier-legacy-recorder:1:record" ]
+          ++ [ "io.github.nix-purifiers:maven-purifier-legacy-recorder:1:record-project" ]
         )
       } </dev/null || maven_failed
   '';
