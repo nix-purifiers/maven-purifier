@@ -71,7 +71,7 @@ STATE_DIR = ".maven-purifier"
 CENTRAL = "https://repo.maven.apache.org/maven2/"
 
 # The line of .mvn/maven.config from which on `prefetch` writes lines of
-# its own (nix/lib/maven-config-marker.nix). It defines a property that
+# its own (lib-overlays/default/maven-config-marker.nix). It defines a property that
 # nothing reads, since maven.config has no comments.
 PREFETCH_MARKER = "-Dmaven-purifier.prefetched=true"
 
@@ -274,7 +274,7 @@ def definition_files(root):
     They are every regular file named pom.xml, and every regular file under
     .mvn/ at the build root. Directories in SKIPPED_DIRS, directories whose
     names start with "result", and symbolic links take no part.
-    nix/lib/definition-hash.nix walks the build root by the same rules.
+    lib-overlays/default/definition-hash.nix walks the build root by the same rules.
     """
     files = []
     for dirpath, dirnames, filenames in os.walk(root):
@@ -297,7 +297,7 @@ def definition_hash(root, goals):
     each definition file. For .mvn/maven.config the hash covers the build's
     own lines (build_config_lines) joined by newlines, so the lines that
     `prefetch` writes take no part. Nix computes the same text from the
-    build root (nix/lib/definition-hash.nix), so a sandboxed build can tell
+    build root (lib-overlays/default/definition-hash.nix), so a sandboxed build can tell
     a stale lock at evaluation time.
     """
     lines = ["goals " + " ".join(goals)]

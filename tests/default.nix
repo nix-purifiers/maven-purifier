@@ -222,7 +222,7 @@ let
   # fails with them.
   problemsOf =
     l:
-    (import ../nix/lib/lock.nix {
+    (import ../lib-overlays/default/lock.nix {
       src = ./fixtures/multi;
       lockFile = lockFileOf l;
     }).problems;

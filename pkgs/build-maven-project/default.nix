@@ -87,7 +87,7 @@ let
   # The lock in memory (lock.nix), which checkLock fails on when the
   # lockfile is stale, tampered or malformed.
   checked = purifier.checkLock (
-    import ./lock.nix {
+    import ../../lib-overlays/default/lock.nix {
       inherit src lockFile checkDefinition;
     }
   );
@@ -232,7 +232,7 @@ let
         POM
       '';
 
-  marker = import ./maven-config-marker.nix;
+  marker = import ../../lib-overlays/default/maven-config-marker.nix;
 
   # Runs Maven offline in the build root, on a writable copy of the
   # repository. The jars get a fixed timestamp, so that a rebuild gives the

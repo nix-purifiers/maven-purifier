@@ -13,8 +13,8 @@ in
   inherit extension;
   # The `maven-purifier` command, with `lock` and `mvn`.
   cli = callPackage ./cli { inherit version extension; };
-  # The builder (nix/lib/build-maven-project.nix), on the purifier library.
-  buildMavenProject = callPackage ../nix/lib/build-maven-project.nix {
+  # The builder (pkgs/build-maven-project/default.nix), on the purifier library.
+  buildMavenProject = callPackage ./build-maven-project {
     inherit (lib) purifier;
     inherit extension;
   };
