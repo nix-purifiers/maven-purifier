@@ -43,7 +43,8 @@ public final class RecordingEventSpyTest {
     directory.setAccessible(true);
     directory.set(spy, snapshots);
     RemoteRepository remote = new RemoteRepository.Builder("origin", "default", "https://example.org/repo").build();
-    DefaultArtifact coordinate = new DefaultArtifact("example:same:jar:tests:1");
+    org.eclipse.aether.artifact.Artifact coordinate =
+        new DefaultArtifact("example:same:jar:tests:1").setFile(artifact.toFile());
     DefaultRepositorySystemSession session = new DefaultRepositorySystemSession();
     session.setLocalRepositoryManager(
         new org.eclipse.aether.internal.impl.SimpleLocalRepositoryManagerFactory().newInstance(
@@ -58,6 +59,22 @@ public final class RecordingEventSpyTest {
     Files.write(artifact, "locally built tests".getBytes(StandardCharsets.UTF_8));
     spy.onEvent(new RepositoryEvent.Builder(session, RepositoryEvent.EventType.ARTIFACT_INSTALLED)
         .setArtifact(coordinate).setFile(artifact.toFile()).build());
+    String installedHash = "sha256-" + java.util.Base64.getEncoder().encodeToString(
+        java.security.MessageDigest.getInstance("SHA-256").digest("locally built tests".getBytes(StandardCharsets.UTF_8)));
+    if (!output.toString().contains("\"source\":" + DocumentationCapture.json(artifact.toString()))
+        || !output.toString().contains("\"sourceHash\":" + DocumentationCapture.json(installedHash))) {
+      throw new AssertionError("install evidence must bind the actual source file and its observed bytes");
+    }
+    Files.write(artifact, "later producer output".getBytes(StandardCharsets.UTF_8));
+    try (Stream<Path> paths = Files.list(snapshots)) {
+      if (paths.filter(path -> path.getFileName().toString().startsWith("install-")).noneMatch(path -> {
+        try {
+          return "locally built tests".equals(new String(Files.readAllBytes(path), StandardCharsets.UTF_8));
+        } catch (Exception e) {
+          throw new AssertionError(e);
+        }
+      })) throw new AssertionError("producer evidence must retain the observed install bytes");
+    }
     check("published tests", new String(Files.readAllBytes(copies.get(0)), StandardCharsets.UTF_8));
     if (!output.toString().contains("\"snapshot\":" + DocumentationCapture.json(copies.get(0).toString()))
         || !output.toString().contains("https://example.org/repo/example/same/1/same-1-tests.jar")

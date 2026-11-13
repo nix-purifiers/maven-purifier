@@ -768,6 +768,84 @@ class PrimaryPublications(TemporaryTree):
 
 
 class DownloadSnapshots(TemporaryTree):
+    def forwarded(self, repository, source, contents="input"):
+        event = self.transfer(repository, contents)
+        event["url"] = source.as_uri()
+        event["repositoryUrl"] = source.parent.as_uri()
+        return event
+
+    def test_file_forwarding_follows_remote_snapshot_after_local_overwrite(self):
+        remote = self.transfer("primary", "remote input")
+        forwarded = self.forwarded("child", Path(remote["file"]), "remote input")
+        Path(remote["file"]).write_text("later local output")
+        events = [forwarded, remote]
+        proven = mp.validated_file_transfers(events, self.root / "primary", self.root / "record.jsonl", {})
+        self.assertEqual(proven, {0})
+        downloads, *_ = mp.captured_downloads(
+            events, self.root / "primary", self.root / "record.jsonl", {}, 2, proven)
+        self.assertEqual(list(downloads.values()), [remote["url"]])
+
+    def test_file_forwarding_accepts_observed_install_snapshot(self):
+        installed = self.transfer("producer", "generated fixture")
+        installed["event"] = "install"
+        installed["source"] = str(self.root / "copy/target/fixture.jar")
+        installed["producerDirectory"] = str(self.root / "copy/target")
+        installed["sourceHash"] = mp.sri(Path(installed["snapshot"]))
+        forwarded = self.forwarded("child", Path(installed["file"]), "generated fixture")
+        self.assertEqual(mp.validated_file_transfers(
+            [forwarded, installed], self.root / "primary", self.root / "record.jsonl", {},
+            self.root / "copy", self.root / "source"), {0})
+
+    def test_installing_an_unknown_host_cache_is_not_a_producer(self):
+        installed = self.transfer("producer", "host bytes")
+        installed.update(event="install", source=str(self.root / "host-cache/input.jar"),
+                         producerDirectory=str(self.root / "copy/target"),
+                         sourceHash=mp.sri(Path(installed["snapshot"])))
+        forwarded = self.forwarded("child", Path(installed["file"]), "host bytes")
+        with self.assertRaises(SystemExit):
+            mp.validated_file_transfers([forwarded, installed], self.root / "primary",
+                                       self.root / "record.jsonl", {}, self.root / "copy", self.root / "source")
+
+    def test_existing_host_cache_and_providerless_cycles_are_rejected(self):
+        source = self.write("host-cache/input.jar", "input")
+        unknown = self.forwarded("child", source)
+        first = self.forwarded("first", self.root / "second/example/input/1/input-1.jar")
+        second = self.forwarded("second", Path(first["file"]))
+        for events in [[unknown], [first, second]]:
+            with self.assertRaises(SystemExit):
+                mp.validated_file_transfers(events, self.root / "primary", self.root / "record.jsonl", {})
+
+    def test_file_forwarding_uses_immutable_supplied_input(self):
+        source = self.write("primary/input.jar", "later local output")
+        supplied = self.write("immutable-provider/input.jar", "input")
+        event = self.forwarded("child", source)
+        self.assertEqual(mp.validated_file_transfers(
+            [event], self.root / "primary", self.root / "record.jsonl", {source: supplied}), {0})
+
+    def test_file_repository_in_source_must_match_included_source_bytes(self):
+        relative = "src/it/repository/input.jar"
+        original = self.write("source/" + relative, "input")
+        source = self.root / "copy" / relative
+        event = self.forwarded("child", source)
+        self.assertEqual(mp.validated_file_transfers(
+            [event], self.root / "primary", self.root / "record.jsonl", {},
+            self.root / "copy", self.root / "source"), {0})
+        original.write_text("different source")
+        with self.assertRaises(SystemExit):
+            mp.validated_file_transfers([event], self.root / "primary", self.root / "record.jsonl", {},
+                                       self.root / "copy", self.root / "source")
+        generated = self.forwarded("child-generated", self.root / "copy/target/input.jar")
+        self.write("source/target/input.jar", "input")
+        with self.assertRaises(SystemExit):
+            mp.validated_file_transfers([generated], self.root / "primary", self.root / "record.jsonl", {},
+                                       self.root / "copy", self.root / "source")
+        self.write("source/internal/input.jar", "input")
+        (self.root / "source/result-link").symlink_to(self.root / "source/internal", target_is_directory=True)
+        excluded = self.forwarded("child-excluded", self.root / "copy/result-link/input.jar")
+        with self.assertRaises(SystemExit):
+            mp.validated_file_transfers([excluded], self.root / "primary", self.root / "record.jsonl", {},
+                                       self.root / "copy", self.root / "source")
+
     def transfer(self, repository, contents, origin="https://origin.example/"):
         relative = "example/input/1/input-1.jar"
         file = self.write(repository + "/" + relative, contents)

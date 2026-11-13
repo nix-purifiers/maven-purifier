@@ -720,7 +720,91 @@ def download_source(event, record):
     return source
 
 
-def captured_downloads(events, repo, record, provided_sources, build_events):
+def validated_file_transfers(events, repo, record, initial_sources, project=None, source_root=None):
+    """Prove cache forwarding from captured inputs or observed producer outputs.
+
+    A file repository is a native provider, not an external download URL.
+    Follow immutable byte observations back to a remote transfer, an install,
+    a supplied immutable input, or an unchanged source file. Unknown host
+    cache files and cycles without a provider cannot enter the lock this way.
+    """
+    nodes = {}
+    hashes = {}
+    for index, event in enumerate(events):
+        if event["event"] not in ("download", "install") or "snapshot" not in event:
+            continue
+        repository_path(event, repo)
+        hashes[index] = sri(download_source(event, record))
+        key = (Path(os.path.abspath(event["file"])), hashes[index])
+        nodes.setdefault(key, []).append(index)
+    initial = {Path(os.path.abspath(path)): sri(source) for path, source in initial_sources.items()}
+    proven = set()
+
+    def file_source(event):
+        url = urllib.parse.urlparse(event["url"])
+        if url.netloc not in ("", "localhost") or url.query or url.fragment:
+            fail(f"unsupported file repository URL: {event['url']}")
+        path = Path(urllib.request.url2pathname(url.path))
+        if not path.is_absolute():
+            fail(f"file repository URL must be absolute: {event['url']}")
+        return Path(os.path.abspath(path))
+
+    def supplied(path, digest):
+        if initial.get(path) == digest:
+            return True
+        if project is None or source_root is None or not path.is_relative_to(project):
+            return False
+        relative = path.relative_to(project)
+        if any(part in SKIPPED_DIRS for part in relative.parts):
+            return False
+        original = source_root / relative
+        first = relative.parts[0]
+        if first.startswith("result") and (source_root / first).is_symlink():
+            return False
+        return (original.is_file() and original.resolve().is_relative_to(source_root.resolve())
+                and sri(original) == digest)
+
+    def provider(index, visiting):
+        if index in proven:
+            return True
+        if index in visiting or index not in hashes:
+            return False
+        event = events[index]
+        if event["event"] == "download" and urllib.parse.urlparse(event["url"]).scheme != "file":
+            proven.add(index)
+            return True
+        if event["event"] == "install":
+            if event.get("sourceHash") != hashes[index]:
+                return False
+            source = Path(event.get("source", ""))
+            if not source.is_absolute():
+                return False
+            source = Path(os.path.abspath(source))
+            output = Path(event.get("producerDirectory", ""))
+            if (project is not None and output.is_absolute()
+                    and output.resolve().is_relative_to(project.resolve())
+                    and source.resolve().is_relative_to(output.resolve())):
+                proven.add(index)
+                return True
+        else:
+            source = file_source(event)
+        if supplied(source, hashes[index]) or any(
+            provider(candidate, visiting | {index}) for candidate in nodes.get((source, hashes[index]), [])
+        ):
+            proven.add(index)
+            return True
+        return False
+
+    forwarded = set()
+    for index, event in enumerate(events):
+        if event["event"] == "download" and urllib.parse.urlparse(event["url"]).scheme == "file":
+            if not provider(index, set()):
+                fail(f"file repository input has no captured immutable provider: {event['url']}")
+            forwarded.add(index)
+    return forwarded
+
+
+def captured_downloads(events, repo, record, provided_sources, build_events, file_transfers=()):
     """Join isolated resolver inputs; one lock path cannot hold conflicting bytes."""
     downloads = {}
     download_sources = {}
@@ -729,6 +813,10 @@ def captured_downloads(events, repo, record, provided_sources, build_events):
     repository_urls = {}
     for index, e in enumerate(events):
         if e["event"] != "download":
+            continue
+        if urllib.parse.urlparse(e["url"]).scheme == "file":
+            if index not in file_transfers:
+                fail(f"file repository input has no captured immutable provider: {e['url']}")
             continue
         rel = repository_path(e, repo)
         if rel in provided_sources:
@@ -1035,12 +1123,14 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
         repo = tmp / "repository"
         repo.mkdir()
         declared = []
+        initial_sources = {}
         for d in declared_downloads(root):
             info(f"fetching {fetch_url(d['url'])}")
             declared_hash, declared_store = prefetch_file(d["url"])
             target = repo / d["path"]
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(declared_store, target)
+            initial_sources[target] = Path(declared_store)
             declared.append(file_entry(Path(d["path"]).as_posix(), d["url"], declared_hash))
         provided_paths = set()
         provided_sources = {}
@@ -1059,6 +1149,7 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
                         relative = path.relative_to(view["repository"]).as_posix()
                         provided_paths.add(relative)
                         provided_sources[relative] = path
+                        initial_sources[repo / relative] = path
                 for module in json.loads(view["catalog"].read_text())["modules"]:
                     key = module["group"] + ":" + module["name"]
                     if key in selections and selections[key] != module["version"]:
@@ -1069,6 +1160,11 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
         declared_paths = {d["path"] for d in declared}
         seeded = seed_metadata(repo, previous, refresh)
         seeded.update(javadoc_resources.seed(previous, repo, refresh == "all"))
+        for relative in sorted(seeded):
+            preserved = tmp / "seeded-inputs" / relative
+            preserved.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(repo / relative, preserved)
+            initial_sources[repo / relative] = preserved
         (tmp / "home").mkdir()
         write_run_settings(settings, tmp / "settings.xml", legacy=maven_version_tuple(mvn) < (3, 1, 0))
         record = tmp / "record.jsonl"
@@ -1081,6 +1177,11 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
         # own directory.
         (tmp / "java-tmp").mkdir()
         maven_opts = [env.get("MAVEN_OPTS", ""), f"-Duser.home={tmp / 'home'}", f"-Djava.io.tmpdir={tmp / 'java-tmp'}"]
+        if maven_version_tuple(mvn) >= (3, 1, 0):
+            # Invoker launches another Maven process: command-line -D options
+            # of the parent are not inherited by that process. Its ordinary
+            # Maven launcher reads MAVEN_OPTS from the inherited environment.
+            maven_opts.append(shlex.quote("-Dmaven.ext.class.path=" + os.environ["MAVEN_PURIFIER_EXTENSION"]))
         if proxy_with_credentials():
             # Java disables Basic authentication to a proxy by default, for
             # HTTPS tunnels and plain requests alike. Maven 3.9's Apache
@@ -1126,8 +1227,9 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
                 info(f"the development pass with Maven {editor_maven} failed; the editor may miss plugins offline")
 
         events = read_record(record) if record.exists() else []
+        forwarded = validated_file_transfers(events, repo, record, initial_sources, project, root)
         downloads, download_sources, development_paths, repository_urls = captured_downloads(
-            events, repo, record, provided_sources, build_events)
+            events, repo, record, provided_sources, build_events, forwarded)
 
         # A seeded metadata file stays in the lock while the build reads it.
         read_metadata = {repository_path(e, repo) for e in events if e["event"] == "resolved"

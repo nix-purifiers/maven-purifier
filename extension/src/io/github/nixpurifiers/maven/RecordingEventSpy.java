@@ -55,6 +55,7 @@ public class RecordingEventSpy extends AbstractEventSpy {
   private String lockedMaven;
   private final Set<String> unresolved = new LinkedHashSet<>();
   private final Map<org.apache.maven.plugin.MojoExecution, DocumentationCapture.Invocation> documentation = new IdentityHashMap<>();
+  private final Set<Path> producerDirectories = new LinkedHashSet<>();
 
   @Override
   public void init(Context context) throws IOException {
@@ -117,6 +118,10 @@ public class RecordingEventSpy extends AbstractEventSpy {
       org.apache.maven.execution.ExecutionEvent execution = (org.apache.maven.execution.ExecutionEvent) event;
       try {
         if (execution.getType() == org.apache.maven.execution.ExecutionEvent.Type.MojoStarted) {
+          org.apache.maven.project.MavenProject project = execution.getProject();
+          if (project != null && project.getBuild() != null && project.getBuild().getDirectory() != null) {
+            producerDirectories.add(Paths.get(project.getBuild().getDirectory()).toAbsolutePath().normalize());
+          }
           DocumentationCapture.Invocation invocation = DocumentationCapture.started(execution);
           if (invocation != null) documentation.put(execution.getMojoExecution(), invocation);
         } else if (execution.getType() == org.apache.maven.execution.ExecutionEvent.Type.MojoSucceeded) {
@@ -266,6 +271,23 @@ public class RecordingEventSpy extends AbstractEventSpy {
   }
 
   private void install(Artifact a, RepositoryEvent e) throws IOException {
+    Files.createDirectories(downloadDirectory);
+    Path snapshot = Files.createTempFile(downloadDirectory, "install-", ".bin");
+    Files.copy(e.getFile().toPath(), snapshot, StandardCopyOption.REPLACE_EXISTING);
+    String source = a.getFile() == null ? "" : a.getFile().getAbsolutePath();
+    String sourceHash = source.isEmpty() ? "" : contentHash(a.getFile().toPath());
+    String output = "";
+    if (!source.isEmpty()) {
+      Path input = a.getFile().toPath().toAbsolutePath().normalize();
+      // installAtEnd can install another reactor project's artifact from the
+      // last project's mojo; use observed project outputs, not that thread's
+      // current project. The CLI additionally confines these to its build copy.
+      for (Path directory : producerDirectories) {
+        if (input.startsWith(directory) && directory.toString().length() > output.length()) {
+          output = directory.toString();
+        }
+      }
+    }
     out.write(
         "{\"event\":\"install\",\"groupId\":"
             + json(a.getGroupId())
@@ -280,8 +302,26 @@ public class RecordingEventSpy extends AbstractEventSpy {
             + ",\"file\":"
             + json(e.getFile().getAbsolutePath())
             + repositoryFields(e)
+            + ",\"snapshot\":" + json(snapshot.toAbsolutePath().toString())
+            + ",\"source\":" + json(source)
+            + ",\"sourceHash\":" + json(sourceHash)
+            + ",\"producerDirectory\":" + json(output)
             + "}\n");
     out.flush();
+  }
+
+  private static String contentHash(Path file) throws IOException {
+    try {
+      java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+      try (java.io.InputStream input = Files.newInputStream(file)) {
+        byte[] buffer = new byte[8192];
+        int count;
+        while ((count = input.read(buffer)) != -1) digest.update(buffer, 0, count);
+      }
+      return "sha256-" + java.util.Base64.getEncoder().encodeToString(digest.digest());
+    } catch (java.security.NoSuchAlgorithmException error) {
+      throw new IOException("SHA-256 is unavailable", error);
+    }
   }
 
   private static String repositoryFields(RepositoryEvent event) throws IOException {
