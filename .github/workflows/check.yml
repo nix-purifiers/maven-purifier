@@ -114,7 +114,8 @@ jobs:
           HOME="$RUNNER_TEMP/home" mvn -B -ntp clean install
           python3 "$GITHUB_WORKSPACE/tests/real-world/gson/check-reports.py" .
           # Maven must fail rather than fall back to a remote repository.
-          junit=.maven-purifier/repository/junit/junit/4.13.2/junit-4.13.2.jar
+          settings=$(python3 -c 'from pathlib import Path; print(next(line.split("=", 1)[1] for line in Path(".mvn/maven.config").read_text().split("-Dmaven-purifier.prefetched=true\n", 1)[1].splitlines() if line.startswith("--settings=")))')
+          junit=$(python3 -c 'from pathlib import Path; import sys, xml.etree.ElementTree as ET; repository = next(e.text for e in ET.parse(sys.argv[1]).getroot().iter() if e.tag.rsplit("}", 1)[-1] == "localRepository"); print(Path(repository) / "junit/junit/4.13.2/junit-4.13.2.jar")' "$settings")
           test -f "$junit"
           mv "$junit" "$RUNNER_TEMP/withheld-junit.jar"
           if HOME="$RUNNER_TEMP/home" mvn -B -ntp -pl gson test > "$RUNNER_TEMP/missing-artifact.log" 2>&1; then
@@ -200,8 +201,9 @@ jobs:
               JAVA_HOME="$JAVA_HOME" "$@"
           }
           offline .maven-purifier/bin/mvn -B -ntp clean install
+          settings=$("$RUNNER_TEMP/python/bin/python3" -c 'from pathlib import Path; print(next(line.split("=", 1)[1] for line in Path(".mvn/maven.config").read_text().split("-Dmaven-purifier.prefetched=true\n", 1)[1].splitlines() if line.startswith("--settings=")))')
           offline "$RUNNER_TEMP/python/bin/python3" "$GITHUB_WORKSPACE/tests/ide/jdtls_check.py" \
-            "$RUNNER_TEMP/jdtls/bin/jdtls" . .maven-purifier/settings.xml \
+            "$RUNNER_TEMP/jdtls/bin/jdtls" . "$settings" \
             core/src/main/java/example/multi/core/Greeting.java
       - name: Name `maven-purifier lock` for a stale lock
         run: |
