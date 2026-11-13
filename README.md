@@ -301,33 +301,43 @@ repository. For a lockfile outside the build root, the root stays in the
 build root rather than beside the lockfile. Besides what the build downloads, the lock holds what
 day-to-day development asks for: every plugin the build declares, the source
 jars of its dependencies, and the default plugins of the Maven inside the
-editor. The command copies the locked repository to
-`.maven-purifier/repository`, writes `.maven-purifier/settings.xml` with
-offline mode on, and adds lines of its own at the end of
-`.mvn/maven.config`, after the line `-Dmaven-purifier.prefetched=true`.
-Maven reads that file for every build, so `mvn`, `./mvnw` and an editor
-that reads it resolve from the locked files. The lines of `prefetch` take
-no part in the build definition, and a lock run or a Nix build leaves them
-out; delete them to resolve online again.
+editor. Prefetch creates a private external view containing a writable copy of the
+locked repository, offline settings, toolchains and project-input metadata.
+It adds a managed suffix to `.mvn/maven.config`, starting with
+`-Dmaven-purifier.prefetched=true`. Maven reads the absolute paths in this
+suffix for ordinary builds. The authored prefix is preserved; the suffix
+takes no part in the build definition and is removed from lock-run copies
+and Nix builds. Removing it restores the project's original configuration.
 
-The lines also load maven-purifier's extension, which warns when a Maven of
-another version runs: its default plugin versions differ from the locked
-ones. The locked Maven is `.maven-purifier/bin/mvn`.
-The prefetch GC root and an alias to the runtime observed during prefetch
-live under `$XDG_STATE_HOME/maven-purifier/projects/` (default
-`~/.local/state/maven-purifier/projects/`), keyed by the absolute project
-path. Prefetch prints the directory; retain it to keep the downloads rooted
-against Nix garbage collection. Directory aliases stay outside the project
-so native source-tree walks see ordinary directories. The launcher continues
-to honor your runtime environment. Put
-`.maven-purifier/bin` on `PATH`, or use a Maven wrapper that names the
-locked version.
+The stable launcher is `.maven-purifier/bin/mvn`. Its versioned bootstrap
+uses the activated view and preserves your `JAVA_HOME` and `PATH`. The
+extension warns when another Maven version runs, whose default plugins may
+differ from the locked version. Put `.maven-purifier/bin` on `PATH` to use
+the locked Maven.
+
+Views live under `$XDG_STATE_HOME/maven-purifier/v1/`, or
+`~/.local/state/maven-purifier/v1/`. The namespace identifies the canonical
+project and dependency intent; each prefetch creates a separate operation.
+Prefetch prints that view's pinned launcher and settings paths. Previous
+views stay available, including their toolchain configuration. The tool
+keeps the writable repository and directory aliases outside the source tree,
+so native file walkers do not traverse downloaded dependencies.
+
+Ordinary prefetch registers roots for the actual immutable store targets
+before activation. Keep the view and its roots to retain its tools and
+inputs. State grows until you explicitly remove owned views; there is no
+automatic pruning. With `--prefetched`, the caller owns the lifetime of the
+supplied closure and helper/tool targets. That mode makes no Nix or daemon
+calls, including when used inside a Nix build sandbox.
+
+Legacy in-tree state or an incompatible bootstrap requires an explicit
+upgrade or a fresh checkout. Prefetch leaves those files intact.
 
 ## Editor
 
 An editor that imports a Maven build, such as VS Code or Neovim through
-jdtls, or IntelliJ IDEA, runs a Maven of its own. After a prefetch, make
-`.maven-purifier/settings.xml` the editor's Maven user settings,
+jdtls, or IntelliJ IDEA, runs a Maven of its own. After a prefetch, use
+the printed generation-pinned settings path as the editor's Maven user settings,
 `java.configuration.maven.userSettings` for jdtls or *User settings file*
 in IntelliJ IDEA, and the editor resolves from the locked files without the
 network: dependencies, their source jars, and the plugins of its own Maven.
@@ -456,7 +466,7 @@ maven-purifier prefetch
 
 Commit `maven-purifier.lock.json`. The locked Maven now builds and tests
 Gson offline with your existing Java runtime, and an editor that reads
-`.maven-purifier/settings.xml` imports it offline:
+the generation-pinned settings file imports it offline:
 
 ```zsh
 .maven-purifier/bin/mvn clean install

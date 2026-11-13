@@ -1458,136 +1458,146 @@ def write_maven_config(root, lines):
     config.write_text(own + "\n".join([PREFETCH_MARKER, *lines]) + "\n")
 
 
-def link_prefetched_toolchains(prefetched, state):
-    """Bind configured Nix JDKs, removing stale bindings when SDKs change."""
-    target = state / "toolchains.xml"
-    if target.exists() or target.is_symlink():
-        target.unlink()
-    source = prefetched / "toolchains.xml"
-    if source.is_file():
-        target.symlink_to(source)
-        return target
-    return None
-
-
 def local_prefetch_state(root):
-    """Keep directory aliases out of source trees traversed by native builds."""
-    configured = Path(os.environ.get("XDG_STATE_HOME", ""))
-    base = configured if configured.is_absolute() else Path.home() / ".local" / "state"
-    base = base.resolve()
-    if base.is_relative_to(root.resolve()):
-        fail("prefetch needs a user state directory outside the project")
-    key = hashlib.sha256(os.fsencode(str(root.resolve()))).hexdigest()
-    base.mkdir(parents=True, exist_ok=True)
-    for part in ("maven-purifier", "projects", key):
-        base = base / part
-        base.mkdir(mode=0o700, exist_ok=True)
-        if base.is_symlink() or not base.is_dir() or base.stat().st_uid != os.getuid():
-            fail(f"prefetch state must be an owned directory, not a symlink: {base}")
-    return base
+    import prefetch_state
+    try:
+        return prefetch_state.namespace(root)
+    except prefetch_state.StateError as error:
+        fail(str(error))
 
 
 def prefetch(args):
+    import prefetch_state as views
     options = Options(args, values=("--prefetched",))
     if options.rest:
         fail(f"`maven-purifier prefetch` takes no argument {options.rest[0]!r}")
-    root = build_root()
+    root = build_root().resolve()
     lock_path = options.lock_path(root)
-    lock_data = read_lock(lock_path)
-    check_fresh(root, lock_path, lock_data)
-    host_java = java_home()
-    state = root / STATE_DIR
-    state.mkdir(exist_ok=True)
-    persistent = local_prefetch_state(root)
+    try:
+        with views.project_lock(root, exclusive=True) as project_descriptor:
+            views.reject_legacy(root)
+            lock_data = read_lock(lock_path)
+            check_fresh(root, lock_path, lock_data)
+            authored_lock = lock_path.read_bytes()
+            config = root / ".mvn/maven.config"
+            if config.is_symlink() or config.parent.is_symlink():
+                fail("prefetch cannot replace an authored Maven configuration symlink")
+            original_config = config.read_bytes() if config.exists() else b""
+            prefix, _ = views.split_config(original_config)
+            mode = stat.S_IMODE(config.stat().st_mode) if config.exists() else 0o600
+            host_java = java_home()
+            intent = {"format": views.FORMAT, "projectRoot": str(root),
+                      "lockHash": lock_data["lockHash"], "definitionHash": lock_data["definitionHash"],
+                      "observedRuntimeHome": str(Path(host_java).resolve())}
+            generation = views.operation(root, intent)
+            supplied = "--prefetched" in options.values
+            if supplied:
+                prefetched = Path(options.values["--prefetched"]).resolve(strict=True)
+            else:
+                info(f"fetching what {lock_path.name} lists into the Nix store")
+                prefetched = Path(nix_build(root, lock_path, "prefetch", generation / "prefetch")).resolve()
+            def retain(path, role):
+                # --prefetched is also used inside Nix builders with no
+                # daemon. Its caller owns the whole supplied tool lifetime.
+                if supplied:
+                    return {"role": role, "target": str(Path(path).resolve()), "lifetime": "provider-owned"}
+                return views.anchor(generation, path, role)
 
-    # `--prefetched` names a prefetch that is built already, as the check of
-    # the offline loop passes one built in the sandbox.
-    if "--prefetched" in options.values:
-        prefetched = Path(options.values["--prefetched"]).resolve()
-    else:
-        info(f"fetching what {lock_path.name} lists into the Nix store")
-        prefetched = Path(nix_build(root, lock_path, "prefetch", persistent / "prefetch"))
+            roots = [retain(prefetched, "provided-prefetch" if supplied else "prefetch")]
+            roots.append(retain(host_java, "observed-caller-runtime"))
+            extension = Path(os.environ["MAVEN_PURIFIER_EXTENSION"])
+            roots.append(retain(extension, "recording-extension"))
+            helper = Path(__file__).with_name("local_maven.py")
+            # Anchor before exposing even the stable bootstrap. Existing
+            # bootstraps keep their exact earlier helper and interpreter.
+            roots.append(retain(helper, "candidate-launch-helper"))
+            roots.append(retain(sys.executable, "candidate-helper-interpreter"))
+            if views.store_target(helper) is None or views.store_target(sys.executable) is None:
+                fail("prefetch needs the immutable installed launch helper and interpreter")
 
-    # Maven writes tracking files next to what it reads and installs into
-    # the local repository, and Maven 3.10 treats a file as absent when its
-    # real path differs from its path in the repository, so the repository
-    # is a writable copy of the one in the store.
-    repo = state / "repository"
-    stamp = state / "repository.source"
-    source = str((prefetched / "repository").resolve())
-    if not (stamp.exists() and stamp.read_text() == source and repo.is_dir()):
-        if repo.exists():
-            shutil.rmtree(repo)
-        shutil.copytree(source, repo, symlinks=False, copy_function=shutil.copyfile)
-        # copytree copies the read-only mode of each directory in the store,
-        # which leaves no room for Maven's lock and tracking files.
-        for directory, _, _ in os.walk(repo):
-            os.chmod(directory, 0o755)
-        stamp.write_text(source)
+            repo = generation / "repository"
+            shutil.copytree(prefetched / "repository", repo, symlinks=False, copy_function=shutil.copyfile)
+            for directory, _, _ in os.walk(repo):
+                os.chmod(directory, 0o755)
+            settings = generation / "settings.xml"
+            offline_settings(lock_data, repo, settings)
+            settings.chmod(0o600)
+            inputs = generation / "project-inputs.properties"
+            input_source = prefetched / "project-inputs.properties"
+            views.atomic_write(inputs, input_source.read_bytes() if input_source.is_file() else b"")
+            toolchains = None
+            if (prefetched / "toolchains.xml").is_file():
+                toolchains = generation / "toolchains.xml"
+                views.atomic_write(toolchains, (prefetched / "toolchains.xml").read_bytes())
+                for element in ET.parse(toolchains).getroot().iter():
+                    if local_name(element.tag) == "jdkHome" and element.text:
+                        roots.append(retain(element.text.strip(), "explicit-toolchain-runtime"))
 
-    offline_settings(lock_data, repo, state / "settings.xml")
-    # The core model adapters discover this file from each original POM,
-    # including IDE builds. The generated metadata remains rooted in Nix.
-    selection = state / "project-inputs.properties"
-    if selection.exists() or selection.is_symlink():
-        selection.unlink()
-    if (prefetched / "project-inputs.properties").is_file():
-        selection.symlink_to(prefetched / "project-inputs.properties")
-    bin_dir = state / "bin"
-    bin_dir.mkdir(exist_ok=True)
-    jdk = persistent / "jdk"
-    if jdk.exists() and not jdk.is_symlink():
-        fail(f"refusing to replace a non-symlink runtime alias: {jdk}")
-    if jdk.is_symlink():
-        jdk.unlink()
-    jdk.symlink_to(host_java)
-    # Migrate only aliases generated by older versions. Ordinary user files
-    # and directories at these paths are left alone.
-    for name in ("prefetch", "jdk"):
-        old = state / name
-        if old.is_symlink():
-            old.unlink()
-    toolchains = link_prefetched_toolchains(prefetched, state)
-    toolchain_options = f"--toolchains {shlex.quote(str(toolchains))} " if toolchains else ""
-    # Maven before 3.3.1 ignores .mvn/maven.config. Pass the locked settings
-    # explicitly. The caller's runtime remains in control of local builds.
-    launcher = bin_dir / "mvn"
-    if launcher.is_symlink():
-        launcher.unlink()
-    launcher.write_text(
-        "#!/bin/sh\n"
-        f"exec {shlex.quote(str(prefetched / 'maven' / 'bin' / 'mvn'))} "
-        f"-Dmaven.ext.class.path={shlex.quote(os.environ['MAVEN_PURIFIER_EXTENSION'])} "
-        "-Dmaven-purifier.replay=true "
-        f"-Dmaven-purifier.root={shlex.quote(str(root))} "
-        f"-o --settings {shlex.quote(str(state / 'settings.xml'))} {toolchain_options}\"$@\"\n"
-    )
-    launcher.chmod(0o755)
-
-    write_maven_config(
-        root,
-        [
-            f"--settings={state / 'settings.xml'}",
-            *([f"--toolchains={toolchains}"] if toolchains else []),
-            f"-Dmaven.ext.class.path={os.environ['MAVEN_PURIFIER_EXTENSION']}",
-            f"-Dmaven-purifier.maven={lock_data['maven']['version']}",
-            "-Dmaven-purifier.replay=true",
-            f"-Dmaven-purifier.root={root}",
-            *MAVEN_FLAGS,
-        ],
-    )
-    info(
-        f"Maven resolves offline from {repo} now. The locked Maven {lock_data['maven']['version']} is "
-        f"{state / 'bin' / 'mvn'}. Local builds use your existing Java runtime; "
-        f"the runtime found during prefetch is {host_java}. "
-        f"Its runtime alias is in {persistent}. "
-        + (
-            "The supplied prefetch remains rooted by its provider."
-            if "--prefetched" in options.values
-            else f"The prefetch GC root is {persistent / 'prefetch'}."
-        )
-    )
-
+            lines = [
+                f"--settings={settings}",
+                *([f"--toolchains={toolchains}"] if toolchains else []),
+                f"-Dmaven.ext.class.path={extension}",
+                f"-Dmaven-purifier.maven={lock_data['maven']['version']}",
+                "-Dmaven-purifier.replay=true",
+                f"-Dmaven-purifier.root={root}",
+                f"-Dmaven-purifier.state={generation}",
+                "-Dmaven-purifier.externalInputs=true",
+                f"-Dmaven-purifier.inputs={inputs}",
+                f"-Dmaven-purifier.inputsHash={views.file_digest(inputs)}",
+                f"-Dmaven-purifier.repository={repo}",
+                *MAVEN_FLAGS,
+            ]
+            published_config, suffix = views.config_bytes(prefix, lines)
+            published_prefix, _ = views.split_config(published_config)
+            # Creating the bootstrap is not activation. Its helper takes the
+            # shared directory lock, so it cannot read this half-prepared view.
+            bootstrap, association = views.install_shim(root, sys.executable, helper)
+            roots.append(retain(association["helper"], "launch-helper"))
+            roots.append(retain(association["interpreter"], "helper-interpreter"))
+            bin_dir = generation / "bin"
+            bin_dir.mkdir(mode=0o700)
+            command = bin_dir / "maven-command"
+            command_argv = [str(prefetched / "maven/bin/mvn"), "-o", *lines]
+            views.atomic_write(command, ("#!/bin/sh\n# SPDX-License-Identifier: MIT\nexec "
+                                         + shlex.join(command_argv) + ' "$@"\n').encode(), 0o700)
+            exported = bin_dir / "mvn"
+            export_argv = [association["interpreter"], association["helper"], str(root),
+                           "--generation", str(generation)]
+            views.atomic_write(exported, ("#!/bin/sh\n# SPDX-License-Identifier: MIT\nexec "
+                                          + shlex.join(export_argv) + ' "$@"\n').encode(), 0o700)
+            files = [settings, inputs, command, exported, *([toolchains] if toolchains else [])]
+            manifest = views.complete(generation, {
+                **intent, "prefetch": str(prefetched), "prefetchSupplied": supplied,
+                "lifetimeMode": "provider-owned-no-nix" if supplied else "owned-roots",
+                "roots": roots, "helper": association,
+                "selectedLock": {"path": str(lock_path), "sha256": views.digest(authored_lock)},
+                "managedConfigHash": views.digest(suffix),
+                "publishedPrefixHash": views.digest(published_prefix),
+                "files": {str(path.relative_to(generation)): views.file_digest(path) for path in files},
+                "paths": {"repository": str(repo), "settings": str(settings), "launcher": str(command),
+                          "exportLauncher": str(exported), "projectInputs": str(inputs),
+                          "toolchains": str(toolchains) if toolchains else None},
+            })
+            views.validate(generation, root, suffix)
+            # Recheck actual authored inputs, not a stored view index. An
+            # unmanaged editor may write while the advisory lock is held.
+            if lock_path.read_bytes() != authored_lock:
+                fail("the authored lock changed while prefetch prepared its view")
+            if (config.read_bytes() if config.exists() else b"") != original_config:
+                fail("the Maven configuration changed while prefetch prepared its view")
+            if config.is_symlink() or config.parent.is_symlink():
+                fail("the Maven configuration became a symlink while prefetch prepared its view")
+            views.check_project_directory(root, project_descriptor)
+            check_fresh(root, lock_path, lock_data)
+            views.atomic_write(config, published_config, mode)
+            info(f"Maven resolves offline from {repo}. The stable launcher is {bootstrap}; "
+                 f"this pinned view's launcher is {exported} and its settings are {settings}. "
+                 f"Local builds keep your runtime environment; prefetch observed {host_java}. "
+                 f"Retain {generation}. "
+                 + ("The supplied closure and helper/tool targets remain rooted by their provider."
+                    if supplied else "Retain its append-only actual-target roots to keep this view available."))
+    except (views.StateError, OSError, subprocess.CalledProcessError, ValueError) as error:
+        fail(f"cannot activate the external Maven view: {error}")
 
 def distribution_target(root, lock_data):
     """The repository id and URL of the root POM's distributionManagement."""

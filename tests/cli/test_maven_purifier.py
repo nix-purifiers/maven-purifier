@@ -150,60 +150,63 @@ class LocalPrefetchState(TemporaryTree):
 
 
 class PrefetchedToolchains(TemporaryTree):
-    def test_native_launcher_passes_configured_toolchains_as_one_path_argument(self):
+    def test_external_views_pin_toolchains_and_old_exports_without_changing_caller_runtime(self):
+        import prefetch_state as views
+        project = self.root / "project"
+        project.mkdir()
         prefetched = self.root / "prefetched SDKs"
         (prefetched / "repository").mkdir(parents=True)
-        (prefetched / "jdk").mkdir()
         backend = self.write("prefetched SDKs/maven/bin/mvn",
-                             f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n")
+                             f"#!{sys.executable}\nimport json, os, sys\n"
+                             "print(json.dumps({'args':sys.argv[1:],'java':os.environ.get('JAVA_HOME')}))\n")
         backend.chmod(0o755)
-        self.write("prefetched SDKs/toolchains.xml", "<toolchains/>")
-        lock = {"javaMajor": "21", "maven": {"version": "3.9.11"}}
+        xml = self.write("prefetched SDKs/toolchains.xml", "<toolchains/>")
+        lock = {"javaMajor": "21", "maven": {"version": "3.9.11"},
+                "lockHash": "selected-lock", "definitionHash": "source-snapshot"}
+        (project / "maven-purifier.lock.json").write_text(json.dumps(lock))
         def settings(_lock, _repo, target):
             target.write_text("<settings/>")
-        state = self.root / mp.STATE_DIR
-        state.mkdir()
-        (state / "prefetch").symlink_to(prefetched)
-        (state / "jdk").symlink_to(prefetched / "jdk")
-        with mock.patch.object(mp, "build_root", return_value=self.root), \
-             mock.patch.object(mp, "java_home", return_value="/existing/host-java"), \
+        def anchor(_generation, path, role):
+            return {"role": role, "target": str(path), "lifetime": "mocked-unit-target"}
+        with mock.patch.object(mp, "build_root", return_value=project), \
+             mock.patch.object(mp, "java_home", return_value="/observed/host-java"), \
              mock.patch.object(mp, "read_lock", return_value=lock), \
              mock.patch.object(mp, "check_fresh"), \
              mock.patch.object(mp, "offline_settings", side_effect=settings), \
-             mock.patch.object(mp, "local_prefetch_state", return_value=self.root / "external-state"), \
-             mock.patch.dict(os.environ, {"MAVEN_PURIFIER_EXTENSION": "/recording-extension.jar"}):
-            (self.root / "external-state").mkdir()
+             mock.patch.object(views, "anchor", side_effect=anchor) as roots, \
+             mock.patch.object(views, "store_target", return_value=Path("/nix/store/unit-helper")), \
+             mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.root / "external state"),
+                                         "JAVA_HOME": "/actual/caller-java",
+                                         "MAVEN_PURIFIER_EXTENSION": "/recording-extension.jar"}):
             mp.prefetch(["--prefetched", str(prefetched)])
+            self.assertEqual(roots.call_count, 0, "supplied views must not require Nix or its daemon")
+            first, _ = views.active_generation(project)
+            first_manifest = json.loads((first / "manifest.json").read_text())
+            self.assertEqual(first_manifest["lifetimeMode"], "provider-owned-no-nix")
+            self.assertTrue(all(item["lifetime"] == "provider-owned" for item in first_manifest["roots"]))
+            first_export = first_manifest["paths"]["exportLauncher"]
+            bootstrap = (project / ".maven-purifier/bin/mvn").read_bytes()
+            xml.unlink()
             with mock.patch.object(mp, "nix_build", return_value=str(prefetched)) as build:
                 mp.prefetch([])
-                self.assertEqual(build.call_args.args[-1], self.root / "external-state/prefetch")
-        state = self.root / mp.STATE_DIR
-        argv = json.loads(subprocess.check_output([str(state / "bin/mvn"), "verify"], text=True))
-        self.assertEqual(argv[-3:], ["--toolchains", str(state / "toolchains.xml"), "verify"])
-        self.assertIn(f"--toolchains={state / 'toolchains.xml'}", (self.root / ".mvn/maven.config").read_text())
-        self.assertFalse((state / "jdk").is_symlink())
-        self.assertFalse((state / "prefetch").is_symlink())
-        self.assertEqual((self.root / "external-state/jdk").readlink(), Path("/existing/host-java"))
-
-    def test_links_the_sdk_configuration_without_copying_store_paths_into_source(self):
-        prefetched = self.root / "prefetched"
-        state = self.root / "state with spaces"
-        state.mkdir()
-        xml = self.write("prefetched/toolchains.xml", "<toolchains/>")
-        target = mp.link_prefetched_toolchains(prefetched, state)
-        self.assertEqual(target, state / "toolchains.xml")
-        self.assertTrue(target.is_symlink())
-        self.assertEqual(target.resolve(), xml)
-
-    def test_reversing_configuration_removes_a_stale_sdk_binding(self):
-        prefetched = self.root / "prefetched"
-        prefetched.mkdir()
-        state = self.root / "state"
-        state.mkdir()
-        stale = state / "toolchains.xml"
-        stale.symlink_to(self.root / "missing-old-prefetch")
-        self.assertIsNone(mp.link_prefetched_toolchains(prefetched, state))
-        self.assertFalse(stale.is_symlink())
+                second, _ = views.active_generation(project)
+                self.assertEqual(build.call_args.args[-1], second / "prefetch")
+        self.assertNotEqual(first, second)
+        self.assertEqual((project / ".maven-purifier/bin/mvn").read_bytes(), bootstrap)
+        self.assertTrue((first / "toolchains.xml").is_file())
+        self.assertFalse((second / "toolchains.xml").exists())
+        self.assertFalse((project / ".maven-purifier/repository").exists())
+        self.assertFalse((project / ".maven-purifier/settings.xml").exists())
+        env = dict(os.environ, JAVA_HOME="/actual/caller-java")
+        observed = json.loads(subprocess.check_output([first_export, "verify"], text=True, env=env))
+        self.assertIn(f"--toolchains={first / 'toolchains.xml'}", observed["args"])
+        self.assertIn(f"--settings={first / 'settings.xml'}", observed["args"])
+        self.assertEqual(observed["args"][-1], "verify")
+        self.assertEqual(observed["java"], "/actual/caller-java")
+        current = json.loads(subprocess.check_output([str(project / ".maven-purifier/bin/mvn"), "verify"],
+                                                     text=True, env=env))
+        self.assertFalse(any(arg.startswith("--toolchains=") for arg in current["args"]))
+        self.assertIn(f"--settings={second / 'settings.xml'}", current["args"])
 
 
 class TrackedRepository(TemporaryTree):

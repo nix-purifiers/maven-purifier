@@ -392,7 +392,15 @@ let
         mvn --version > "$out/toolchain.txt"
         mvn -B -ntp clean install > "$out/maven.log" 2>&1
         python3 ${./real-world/gson/check-reports.py} . | tee "$out/tests.txt"
-        junit=.maven-purifier/repository/junit/junit/4.13.2/junit-4.13.2.jar
+        junit=$(python3 - <<'PY'
+        from pathlib import Path
+        import xml.etree.ElementTree as ET
+        managed = Path('.mvn/maven.config').read_text().split('-Dmaven-purifier.prefetched=true\n', 1)[1].splitlines()
+        settings = Path(next(line.split('=', 1)[1] for line in managed if line.startswith('--settings=')))
+        repository = Path(next(e.text for e in ET.parse(settings).getroot().iter() if e.tag.rsplit('}', 1)[-1] == 'localRepository'))
+        print(repository / 'junit/junit/4.13.2/junit-4.13.2.jar')
+        PY
+        )
         test -f "$junit"
         mv "$junit" $TMPDIR/withheld-junit.jar
         if mvn -B -ntp -pl gson test > "$out/missing-artifact.log" 2>&1; then
@@ -436,11 +444,14 @@ let
         cp ${./extension/io/github/nixpurifiers/maven/LockedReplayParticipantTest.java} src/LockedReplayParticipantTest.java
         cp ${./extension/io/github/nixpurifiers/maven/DocumentationLinksTest.java} src/DocumentationLinksTest.java
         cp ${./extension/io/github/nixpurifiers/maven/DocumentationCaptureTest.java} src/DocumentationCaptureTest.java
+        cp ${../extension/src/io/github/nixpurifiers/maven/ProjectedVersions.java} src/ProjectedVersions.java
+        cp ${./extension/io/github/nixpurifiers/maven/ProjectedVersionsTest.java} src/ProjectedVersionsTest.java
         javac -Xlint:-deprecation -d classes -cp "${pkgs.maven}/maven/lib/*" src/*.java
         java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.RecordingEventSpyTest
         java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.LockedReplayParticipantTest
         java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.DocumentationLinksTest
         java -cp "classes:${pkgs.maven}/maven/lib/*:${pkgs.maven}/maven/boot/*" io.github.nixpurifiers.maven.DocumentationCaptureTest
+        java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.ProjectedVersionsTest
         touch $out
       '';
 
