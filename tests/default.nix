@@ -447,12 +447,15 @@ let
         cp ${./extension/io/github/nixpurifiers/maven/DocumentationCaptureTest.java} src/DocumentationCaptureTest.java
         cp ${../extension/src/io/github/nixpurifiers/maven/ProjectedVersions.java} src/ProjectedVersions.java
         cp ${./extension/io/github/nixpurifiers/maven/ProjectedVersionsTest.java} src/ProjectedVersionsTest.java
+        cp ${../extension/src/io/github/nixpurifiers/maven/DefaultTimestampMojo.java} src/DefaultTimestampMojo.java
+        cp ${./extension/io/github/nixpurifiers/maven/DefaultTimestampMojoTest.java} src/DefaultTimestampMojoTest.java
         javac -Xlint:-deprecation -d classes -cp "${pkgs.maven}/maven/lib/*" src/*.java
         java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.RecordingEventSpyTest
         java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.LockedReplayParticipantTest
         java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.DocumentationLinksTest
         java -cp "classes:${pkgs.maven}/maven/lib/*:${pkgs.maven}/maven/boot/*" io.github.nixpurifiers.maven.DocumentationCaptureTest
         java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.ProjectedVersionsTest
+        java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.DefaultTimestampMojoTest
         touch $out
       '';
 

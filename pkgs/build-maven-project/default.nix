@@ -197,7 +197,8 @@ let
       ''
         mkdir -p classes/META-INF/maven
         cp ${../../extension/src/io/github/nixpurifiers/maven/LegacyRecorderMojo.java} LegacyRecorderMojo.java
-        javac --release 8 -Xlint:-options -d classes -cp "${arguments.maven}/maven/lib/*" LegacyRecorderMojo.java
+        cp ${../../extension/src/io/github/nixpurifiers/maven/DefaultTimestampMojo.java} DefaultTimestampMojo.java
+        javac --release 8 -Xlint:-options -d classes -cp "${arguments.maven}/maven/lib/*" LegacyRecorderMojo.java DefaultTimestampMojo.java
         cp ${../../extension/resources/META-INF/maven/plugin.xml} classes/META-INF/maven/plugin.xml
         # Maven 4 populates the legacy project artifact view on demand.
         sed -i '/<goal>record\(-project\)\?<\/goal>/a\      <requiresDependencyResolution>runtime</requiresDependencyResolution>' \
@@ -266,10 +267,10 @@ let
       -Dmaven.repo.local="$TMPDIR/repository" \
       -Duser.home="$HOME" \
       -Daether.remoteRepositoryFilter.prefixes=false \
-      -Dproject.build.outputTimestamp=1980-01-01T00:00:02Z \
       ${
         lib.escapeShellArgs (
           flags
+          ++ [ "io.github.nix-purifiers:maven-purifier-legacy-recorder:1:default-timestamps" ]
           ++ mavenFlags
           ++ buildGoals
           ++ [ "io.github.nix-purifiers:maven-purifier-legacy-recorder:1:record-project" ]

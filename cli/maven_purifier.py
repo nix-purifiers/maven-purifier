@@ -132,6 +132,8 @@ def seed_legacy_recorder(repo):
     ) as output:
         for entry in source.infolist():
             if entry.filename == "META-INF/maven/plugin.xml":
+                # The local legacy capture bundle contains only its recorder.
+                # Pure-build preparation goals have separate implementations.
                 descriptor = ET.fromstring(source.read(entry.filename))
                 mojos = descriptor.find("mojos")
                 if mojos is None:

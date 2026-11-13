@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest import mock
@@ -659,24 +660,35 @@ class Options(unittest.TestCase):
 
 
 class Compatibility(TemporaryTree):
-    def test_local_legacy_descriptor_excludes_the_pure_per_project_goal(self):
+    def test_local_legacy_bundle_declares_only_its_included_recorder(self):
         extension = self.root / "extension.jar"
-        implementation = "io.github.nixpurifiers.maven.LegacyRecorderMojo"
-        descriptor = ("<plugin><mojos><mojo><goal>record-project</goal><implementation>"
-                      + implementation + "</implementation></mojo><mojo><goal>record</goal>"
-                      "<aggregator>true</aggregator><implementation>" + implementation
-                      + "</implementation></mojo></mojos></plugin>")
-        with mp.zipfile.ZipFile(extension, "w") as archive:
+        descriptor = ("<plugin><mojos>"
+                      "<mojo><goal>record</goal><aggregator>true</aggregator>"
+                      "<implementation>io.github.nixpurifiers.maven.LegacyRecorderMojo</implementation></mojo>"
+                      "<mojo><goal>record-project</goal>"
+                      "<implementation>io.github.nixpurifiers.maven.LegacyRecorderMojo</implementation></mojo>"
+                      "<mojo><goal>default-timestamps</goal>"
+                      "<implementation>io.github.nixpurifiers.maven.DefaultTimestampMojo</implementation></mojo>"
+                      "</mojos></plugin>")
+        prefix = "io/github/nixpurifiers/maven/"
+        with zipfile.ZipFile(extension, "w") as archive:
             archive.writestr("META-INF/maven/plugin.xml", descriptor)
-            archive.writestr(implementation.replace(".", "/") + ".class", b"recorder class")
+            archive.writestr(prefix + "LegacyRecorderMojo.class", b"recorder")
+            archive.writestr(prefix + "LegacyRecorderMojo$Helper.class", b"helper")
+            archive.writestr(prefix + "DefaultTimestampMojo.class", b"pure default")
+            archive.writestr(prefix + "RecordingEventSpy.class", b"core adapter")
         repository = self.root / "repository"
         with mock.patch.dict(os.environ, {"MAVEN_PURIFIER_EXTENSION": str(extension)}):
             mp.seed_legacy_recorder(repository)
-        with mp.zipfile.ZipFile(repository / mp.LEGACY_RECORDER_PATH / "maven-purifier-legacy-recorder-1.jar") as archive:
+        with zipfile.ZipFile(repository / mp.LEGACY_RECORDER_PATH / "maven-purifier-legacy-recorder-1.jar") as archive:
             mojos = ET.fromstring(archive.read("META-INF/maven/plugin.xml")).findall("./mojos/mojo")
-            self.assertEqual([m.findtext("goal") for m in mojos], ["record"])
+            self.assertEqual([mojo.findtext("goal") for mojo in mojos], ["record"])
             self.assertEqual(mojos[0].findtext("aggregator"), "true")
-            self.assertIn(mojos[0].findtext("implementation").replace(".", "/") + ".class", archive.namelist())
+            for mojo in mojos:
+                self.assertIn(mojo.findtext("implementation").replace(".", "/") + ".class", archive.namelist())
+            self.assertIn(prefix + "LegacyRecorderMojo$Helper.class", archive.namelist())
+            self.assertNotIn(prefix + "DefaultTimestampMojo.class", archive.namelist())
+            self.assertNotIn(prefix + "RecordingEventSpy.class", archive.namelist())
 
     def test_java_versions(self):
         for version, major in [("1.8.0_504", "8"), ("17.0.20", "17"), ("26-ea", "26")]:
