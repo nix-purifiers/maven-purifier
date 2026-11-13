@@ -677,8 +677,17 @@ def copy_build(root, dest):
 
 
 def read_record(path):
-    with open(path) as f:
-        events = [json.loads(line) for line in f if line.strip()]
+    # Children and later Maven invocations own separate writers. Read build
+    # shards before development shards so the build prefix stays stable when
+    # the development pass adds files. Within one process, line order remains
+    # the native repository-event order.
+    parts = path.with_name(path.name + ".parts")
+    sources = [path, *sorted((parts / "build").glob("*.jsonl")),
+               *sorted((parts / "development").glob("*.jsonl"))]
+    events = []
+    for source in sources:
+        with source.open() as f:
+            events.extend(json.loads(line) for line in f if line.strip())
     for event in events:
         if event.get("event") == "download-error":
             fail(f"cannot preserve downloaded bytes of {event.get('url')}: {event.get('message')}")
@@ -1001,6 +1010,7 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
 
         env = dict(os.environ)
         env.update({"JAVA_HOME": home, "HOME": str(tmp / "home"), "MAVEN_PURIFIER_RECORD": str(record),
+                    "MAVEN_PURIFIER_PHASE": "build",
                     "MAVEN_PURIFIER_PRESERVED": json.dumps(sorted(declared_paths | seeded | provided_paths))})
         # Plugins that write temporary files write them into the lock run's
         # own directory.
@@ -1037,6 +1047,7 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
         dependency_plugin = "org.apache.maven.plugins:maven-dependency-plugin:2.8" if maven_version_tuple(mvn) < (3, 6, 3) else DEPENDENCY_PLUGIN
         development = [f"{dependency_plugin}:resolve-plugins", f"{dependency_plugin}:sources"]
         info("adding the build's plugins and its dependencies' source jars for development")
+        env["MAVEN_PURIFIER_PHASE"] = "development"
         if run_maven(mvn, project, env, tmp / "settings.xml", repo, development) != 0:
             info("the development pass with the locked Maven failed; the lock leaves out what it would have added")
         editor_maven = os.environ.get("MAVEN_PURIFIER_EDITOR_MAVEN")

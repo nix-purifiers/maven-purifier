@@ -768,6 +768,22 @@ class PrimaryPublications(TemporaryTree):
 
 
 class DownloadSnapshots(TemporaryTree):
+    def test_child_records_keep_build_prefix_when_development_is_added(self):
+        record = self.write("record.jsonl", '{"event":"parent"}\n')
+        self.write("record.jsonl.parts/build/record-b.jsonl", '{"event":"child-b"}\n')
+        self.write("record.jsonl.parts/build/record-a.jsonl", '{"event":"child-a"}\n')
+        build = mp.read_record(record)
+        self.write("record.jsonl.parts/development/record-a.jsonl", '{"event":"development"}\n')
+        self.assertEqual(mp.read_record(record), build + [{"event": "development"}])
+        self.assertEqual([e["event"] for e in build], ["parent", "child-a", "child-b"])
+
+    def test_child_snapshot_error_rejects_capture(self):
+        record = self.write("record.jsonl", "")
+        self.write("record.jsonl.parts/build/record-child.jsonl",
+                   '{"event":"download-error","url":"https://example.invalid/a.jar","message":"copy failed"}\n')
+        with self.assertRaises(SystemExit):
+            mp.read_record(record)
+
     def test_observed_bytes_survive_repository_install(self):
         record = self.root / "record.jsonl"
         downloaded = self.write("record.jsonl.downloads/native.bin", "published bytes")

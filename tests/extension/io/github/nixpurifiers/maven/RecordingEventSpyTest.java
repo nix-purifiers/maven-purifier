@@ -86,6 +86,18 @@ public final class RecordingEventSpyTest {
   }
 
   public static void main(String[] args) throws Exception {
+    Path records = Files.createTempDirectory("nested-records-");
+    Path main = records.resolve("record.jsonl");
+    if (!main.equals(RecordingEventSpy.recordFile(main, "build"))) {
+      throw new AssertionError("first process must retain the main record");
+    }
+    Path child = RecordingEventSpy.recordFile(main, "build");
+    Path sibling = RecordingEventSpy.recordFile(main, "build");
+    Path development = RecordingEventSpy.recordFile(main, "development");
+    if (child.equals(sibling) || !child.getParent().endsWith("build")
+        || !development.getParent().endsWith("development")) {
+      throw new AssertionError("process writers and capture phases must remain separate");
+    }
     org.apache.maven.execution.DefaultMavenExecutionRequest request =
         new org.apache.maven.execution.DefaultMavenExecutionRequest();
     RecordingEventSpy.prepareReplay(request);

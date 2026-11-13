@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
@@ -63,7 +64,7 @@ public class RecordingEventSpy extends AbstractEventSpy {
       downloadDirectory = recordPath.resolveSibling(recordPath.getFileName() + ".downloads");
       out =
           Files.newBufferedWriter(
-              Paths.get(record),
+              recordFile(recordPath, System.getenv("MAVEN_PURIFIER_PHASE")),
               StandardCharsets.UTF_8,
               StandardOpenOption.CREATE,
               StandardOpenOption.APPEND);
@@ -85,6 +86,21 @@ public class RecordingEventSpy extends AbstractEventSpy {
               + ". Their default plugin versions differ, so a plugin may be missing offline; run"
               + " .maven-purifier/bin/mvn, or lock with this Maven's version in"
               + " .mvn/wrapper/maven-wrapper.properties.");
+    }
+  }
+
+  // Each Maven process owns its writer. Invoker children inherit the record
+  // destination, but Java's synchronized methods do not serialize JVMs.
+  // Keep the first process in the original file for runtime consumers;
+  // subsequent processes get private files grouped by capture phase.
+  static Path recordFile(Path record, String phase) throws IOException {
+    try {
+      return Files.createFile(record);
+    } catch (FileAlreadyExistsException existing) {
+      String group = "development".equals(phase) ? "development" : "build";
+      Path parts = record.resolveSibling(record.getFileName() + ".parts").resolve(group);
+      Files.createDirectories(parts);
+      return Files.createTempFile(parts, "record-", ".jsonl");
     }
   }
 
