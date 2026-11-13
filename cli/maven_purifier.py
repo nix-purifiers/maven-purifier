@@ -702,6 +702,25 @@ def artifact_key(install):
     return f"{install['artifactId']}{classifier}{extension}"
 
 
+def primary_installs(events, repo):
+    """Only installs into the build's primary repository are its publications.
+
+    Maven Invoker also installs the project into a separate test repository.
+    Those staging copies and test fixtures must not become published modules.
+    Keep download observations independent: a same-GAV remote input is still
+    needed even when the reactor later installs that coordinate.
+    """
+    primary = Path(os.path.abspath(repo))
+    result = []
+    for event in events:
+        if event["event"] != "install":
+            continue
+        target = Path(os.path.abspath(event["file"]))
+        if target.is_relative_to(primary):
+            result.append(dict(event, file=str(target)))
+    return result
+
+
 def declared_downloads(root):
     """The downloads the build declares in .mvn/maven-purifier.json.
 
@@ -1064,7 +1083,7 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
                 downloads[path] = None
                 download_sources[path] = repo / path
 
-        installs = [e for e in events if e["event"] == "install"]
+        installs = primary_installs(events, repo)
         installed = {Path(e["file"]).relative_to(repo).as_posix() for e in installs}
         # The version and artifact directories of the build's own modules,
         # where installing and deploying write metadata files of their own.

@@ -746,6 +746,27 @@ class JavadocResourcesTests(TemporaryTree):
         self.assertEqual(link.get("metadata"), "https://cache.example/versioned")
 
 
+class PrimaryPublications(TemporaryTree):
+    def test_invoker_staging_copy_is_not_an_additional_publication(self):
+        repo = self.root / "repository"
+        main = {"event": "install", "file": str(repo / "example/plugin/1/plugin-1.jar")}
+        staged = {"event": "install", "file": str(self.root / "project/target/local-repo/example/plugin/1/plugin-1.jar")}
+        downloaded = {"event": "download", "file": main["file"]}
+        events = [staged, downloaded, main]
+        self.assertEqual(mp.primary_installs(events, repo), [main])
+        self.assertEqual(events, [staged, downloaded, main])
+
+    def test_repository_boundary_and_parent_components_are_respected(self):
+        repo = self.root / "repository"
+        events = [
+            {"event": "install", "file": str(self.root / "repository-other/a.jar")},
+            {"event": "install", "file": str(repo / "../secondary/a.jar")},
+            {"event": "install", "file": str(repo / "group/a.jar")},
+            {"event": "install", "file": str(self.root / "other/../repository/group/b.jar")},
+        ]
+        self.assertEqual(mp.primary_installs(events, repo), [events[2], {"event": "install", "file": str(repo / "group/b.jar")}])
+
+
 class DownloadSnapshots(TemporaryTree):
     def test_observed_bytes_survive_repository_install(self):
         record = self.root / "record.jsonl"
