@@ -90,6 +90,7 @@ public class RecordingEventSpy extends AbstractEventSpy {
 
   @Override
   public synchronized void onEvent(Object event) throws IOException {
+    prepareReplay(event);
     if (out == null) {
       guard(event);
       return;
@@ -139,6 +140,18 @@ public class RecordingEventSpy extends AbstractEventSpy {
         break;
       default:
         break;
+    }
+  }
+
+  // Both Maven 3 and Maven 4 dispatch the request before creating its
+  // repository session. A nested Invoker request can be online even though
+  // its parent resolver is offline: afterProjectsRead clears only the
+  // parent's execution flag so requiresOnline goals can run. Establish the
+  // child's resolver flag before Maven snapshots this request too.
+  static void prepareReplay(Object event) {
+    if (event instanceof org.apache.maven.execution.MavenExecutionRequest
+        && Boolean.parseBoolean(System.getProperty("maven-purifier.replay"))) {
+      ((org.apache.maven.execution.MavenExecutionRequest) event).setOffline(true);
     }
   }
 

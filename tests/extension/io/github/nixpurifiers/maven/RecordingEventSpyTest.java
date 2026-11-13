@@ -86,6 +86,18 @@ public final class RecordingEventSpyTest {
   }
 
   public static void main(String[] args) throws Exception {
+    org.apache.maven.execution.DefaultMavenExecutionRequest request =
+        new org.apache.maven.execution.DefaultMavenExecutionRequest();
+    RecordingEventSpy.prepareReplay(request);
+    if (request.isOffline()) throw new AssertionError("ordinary capture became offline");
+    System.setProperty("maven-purifier.replay", "true");
+    try {
+      RecordingEventSpy.prepareReplay(request);
+      if (!request.isOffline()) throw new AssertionError("nested replay request remained online");
+      RecordingEventSpy.prepareReplay(new Object());
+    } finally {
+      System.clearProperty("maven-purifier.replay");
+    }
     check(
         "org/apache/commons/commons-lang3/3.17.0/commons-lang3-3.17.0.jar",
         RecordingEventSpy.artifactPath(
