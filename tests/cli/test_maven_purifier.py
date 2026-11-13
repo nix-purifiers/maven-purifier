@@ -293,6 +293,34 @@ class Settings(TemporaryTree):
             self.assertFalse(mp.proxy_with_credentials())
 
 
+class DistributionProxy(TemporaryTree):
+    def test_private_maven_proxy_supports_separate_child_user_settings(self):
+        settings = self.write("maven/conf/settings.xml", '<settings xmlns="urn:settings"><proxies/></settings>')
+        with mock.patch.dict(os.environ, {"https_proxy": "http://test-user:test-pass@proxy.example:8080",
+                                         "no_proxy": "localhost,127.0.0.1"}, clear=True):
+            mp.distribution_proxy(self.root / "maven/bin/mvn", ET.Element("settings"))
+        root = ET.parse(settings).getroot()
+        q = mp.qualifier(root)
+        proxy = root.find(q("proxies") + "/" + q("proxy"))
+        self.assertEqual(proxy.findtext(q("host")), "proxy.example")
+        self.assertEqual(proxy.findtext(q("username")), "test-user")
+        self.assertEqual(proxy.findtext(q("password")), "test-pass")
+        self.assertEqual(proxy.findtext(q("nonProxyHosts")), "localhost|127.0.0.1")
+
+    def test_explicit_proxy_settings_and_absent_environment_are_preserved(self):
+        for global_xml, caller, environment in [
+            ('<settings><proxies><proxy><id>explicit</id></proxy></proxies></settings>', ET.Element("settings"),
+             {"https_proxy": "http://proxy.example:8080"}),
+            ('<settings><proxies/></settings>', ET.fromstring('<settings><proxies/></settings>'),
+             {"https_proxy": "http://proxy.example:8080"}),
+            ('<settings><proxies/></settings>', ET.Element("settings"), {}),
+        ]:
+            settings = self.write("maven/conf/settings.xml", global_xml)
+            with mock.patch.dict(os.environ, environment, clear=True):
+                mp.distribution_proxy(self.root / "maven/bin/mvn", caller)
+            self.assertEqual(settings.read_text(), global_xml)
+
+
 class OfflineSettings(TemporaryTree):
     def test_offline_on_the_locked_repository(self):
         lock = {"settings": '<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"><mirrors/></settings>\n'}

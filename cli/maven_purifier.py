@@ -644,6 +644,30 @@ def write_run_settings(settings, path, legacy=False):
     path.write_text(ET.tostring(settings, encoding="unicode") + "\n")
 
 
+def distribution_proxy(mvn, caller_settings):
+    """Bridge proxy environment variables for children of this private Maven.
+
+    Invoker supplies its own user settings, so the parent's generated -s file
+    cannot supply its proxy. Only this lock run's unpacked distribution is
+    changed; explicit caller or distribution proxy settings take precedence.
+    """
+    if any(local_name(child.tag) == "proxies" for child in caller_settings):
+        return
+    path = mvn.parent.parent / "conf" / "settings.xml"
+    settings = ET.parse(path).getroot()
+    qualify = qualifier(settings)
+    proxies = next((child for child in settings if local_name(child.tag) == "proxies"), None)
+    if proxies is not None and len(proxies):
+        return
+    inherited = env_proxies(qualify)
+    if not inherited:
+        return
+    if proxies is None:
+        proxies = ET.SubElement(settings, qualify("proxies"))
+    proxies.extend(inherited)
+    path.write_text(ET.tostring(settings, encoding="unicode") + "\n")
+
+
 def offline_settings(lock_data, repo, path):
     """Writes the settings of a prefetched Maven: the recorded settings, offline, on the locked repository."""
     settings = ET.fromstring(lock_data.get("settings") or "<settings/>")
@@ -1114,6 +1138,7 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
         dist_hash, dist_store = prefetch_file(url)
         dist_path = download_path(url)
         mvn = unpack_maven(Path(dist_store), tmp / "maven")
+        distribution_proxy(mvn, settings)
         maven_version = mvn.parent.parent.name.removeprefix("apache-maven-")
         if inputs and maven_version_tuple(mvn) < (3, 0, 0):
             fail("native Nix project inputs currently need Maven 3 or newer; "
@@ -1223,6 +1248,7 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
             editor_hash, editor_store = prefetch_file(maven_url(editor_maven))
             editor_dist = file_entry(download_path(maven_url(editor_maven)), maven_url(editor_maven), editor_hash)
             editor_mvn = unpack_maven(Path(editor_store), tmp / "editor-maven")
+            distribution_proxy(editor_mvn, settings)
             if run_maven(editor_mvn, project, env, tmp / "settings.xml", repo, [f"{DEPENDENCY_PLUGIN}:resolve-plugins"]) != 0:
                 info(f"the development pass with Maven {editor_maven} failed; the editor may miss plugins offline")
 
