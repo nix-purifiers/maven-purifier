@@ -13,6 +13,13 @@ import org.apache.maven.execution.MavenSession;
 public final class LockedReplayParticipant extends AbstractMavenLifecycleParticipant {
   @Override
   public void afterProjectsRead(MavenSession session) throws MavenExecutionException {
+    try {
+      // A relock also uses seeded documentation snapshots, without changing
+      // its online resolver or the caller's Java runtime.
+      DocumentationLinks.apply(session);
+    } catch (Exception error) {
+      throw new MavenExecutionException("maven-purifier: cannot apply locked documentation metadata", error);
+    }
     if (!Boolean.parseBoolean(System.getProperty("maven-purifier.replay"))) return;
     try {
       // Maven 3.0 uses Sonatype Aether; newer Maven uses Eclipse Aether.

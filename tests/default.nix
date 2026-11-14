@@ -30,6 +30,70 @@ let
   # local metadata, and must not be mistaken for a missing download.
   bundle = build { src = ./fixtures/bundle; };
 
+  toolchainJdk17 = pkgs.javaPackages.compiler.openjdk17.headless;
+  toolchainJdk21 = pkgs.temurin-bin-21;
+  toolchainProbe = build {
+    src = ./fixtures/multi;
+    jdkToolchains = [
+      {
+        jdk = toolchainJdk17;
+        provides = {
+          version = "17";
+          vendor = "A&B <vendor>";
+        };
+      }
+      {
+        jdk = toolchainJdk21;
+        provides.version = "21";
+      }
+    ];
+  };
+  invalidToolchainsRejected =
+    lib.all
+      (
+        value:
+        !((builtins.tryEval (
+          (build {
+            src = ./fixtures/multi;
+            jdkToolchains = value;
+          }).prefetch.drvPath
+        )).success
+        )
+      )
+      [
+        "not-a-list"
+        [
+          {
+            jdk = toolchainJdk17;
+            provides.version = 17;
+          }
+        ]
+        [
+          {
+            jdk = toolchainJdk17;
+            provides = {
+              version = "17";
+              "bad<tag" = "x";
+            };
+          }
+        ]
+      ];
+  toolchainCheck =
+    assert invalidToolchainsRejected;
+    pkgs.runCommand "maven-jdk-toolchains" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+      python3 - ${toolchainProbe.prefetch}/toolchains.xml ${toolchainJdk17.home} ${toolchainJdk21.home} <<'PYTHON'
+      import sys, xml.etree.ElementTree as ET
+      root = ET.parse(sys.argv[1]).getroot()
+      chains = root.findall('toolchain')
+      assert len(chains) == 2
+      assert [c.findtext('type') for c in chains] == ['jdk', 'jdk']
+      assert [c.findtext('provides/version') for c in chains] == ['17', '21']
+      assert chains[0].findtext('provides/vendor') == 'A&B <vendor>'
+      assert [c.findtext('configuration/jdkHome') for c in chains] == sys.argv[2:]
+      PYTHON
+      touch $out
+    '';
+
   # The lock names the artifacts of each package, so a consumer reaches
   # them without building first. app runs from the jars of the packages
   # and the locked commons-lang3.
@@ -222,7 +286,7 @@ let
   # fails with them.
   problemsOf =
     l:
-    (import ../nix/lib/lock.nix {
+    (import ../lib-overlays/default/lock.nix {
       src = ./fixtures/multi;
       lockFile = lockFileOf l;
     }).problems;
@@ -262,19 +326,21 @@ let
   conformanceOffline =
     pkgs.runCommand "maven-purifier-conformance-offline"
       {
-        nativeBuildInputs = [ pkgs.coreutils ];
+        nativeBuildInputs = [
+          pkgs.coreutils
+          multi.jdk
+        ];
       }
       ''
-        export HOME=$TMPDIR/home
+        export HOME=$TMPDIR/home JAVA_HOME=${multi.jdk.home}
         mkdir -p $HOME
         cp -r ${./fixtures/multi} $TMPDIR/multi
         chmod -R u+w $TMPDIR/multi
         cd $TMPDIR/multi
         ${cli}/bin/maven-purifier prefetch --prefetched ${multi.prefetch}
         grep -qx -- '-Dmaven-purifier.prefetched=true' .mvn/maven.config
-        export JAVA_HOME=$PWD/.maven-purifier/jdk
         .maven-purifier/bin/mvn -B -ntp clean install 2>&1 | tee $TMPDIR/mvn.log
-        grep -q 'Tests run: 1, Failures: 0' $TMPDIR/mvn.log
+        grep -q 'Tests run: 2, Failures: 0' $TMPDIR/mvn.log
         test -f app/target/app-1.0.0.jar
         touch $out
       '';
@@ -306,9 +372,15 @@ let
   # Execute the ordinary Maven workflow in a networkless derivation too.
   # The networked capture/relock job prepares the same committed lock.
   gsonOffline =
-    pkgs.runCommand "maven-purifier-gson-offline" { nativeBuildInputs = [ pkgs.python3 ]; }
+    pkgs.runCommand "maven-purifier-gson-offline"
+      {
+        nativeBuildInputs = [
+          pkgs.python3
+          gson.jdk
+        ];
+      }
       ''
-        export HOME=$TMPDIR/home
+        export HOME=$TMPDIR/home JAVA_HOME=${gson.jdk.home}
         mkdir -p "$HOME" "$out"
         cp -r ${gsonSource} $TMPDIR/gson
         chmod -R u+w $TMPDIR/gson
@@ -316,12 +388,19 @@ let
         ${cli}/bin/maven-purifier prefetch \
           --lockfile ${./real-world/gson/maven-purifier.lock.json} \
           --prefetched ${gson.prefetch}
-        export JAVA_HOME=$PWD/.maven-purifier/jdk
         export PATH=$PWD/.maven-purifier/bin:$PATH
         mvn --version > "$out/toolchain.txt"
         mvn -B -ntp clean install > "$out/maven.log" 2>&1
         python3 ${./real-world/gson/check-reports.py} . | tee "$out/tests.txt"
-        junit=.maven-purifier/repository/junit/junit/4.13.2/junit-4.13.2.jar
+        junit=$(python3 - <<'PY'
+        from pathlib import Path
+        import xml.etree.ElementTree as ET
+        managed = Path('.mvn/maven.config').read_text().split('-Dmaven-purifier.prefetched=true\n', 1)[1].splitlines()
+        settings = Path(next(line.split('=', 1)[1] for line in managed if line.startswith('--settings=')))
+        repository = Path(next(e.text for e in ET.parse(settings).getroot().iter() if e.tag.rsplit('}', 1)[-1] == 'localRepository'))
+        print(repository / 'junit/junit/4.13.2/junit-4.13.2.jar')
+        PY
+        )
         test -f "$junit"
         mv "$junit" $TMPDIR/withheld-junit.jar
         if mvn -B -ntp -pl gson test > "$out/missing-artifact.log" 2>&1; then
@@ -339,10 +418,11 @@ let
     pkgs.runCommand "maven-purifier-test-unit-cli"
       {
         nativeBuildInputs = [ pkgs.python3 ];
-        MAVEN_PURIFIER_CLI = ../cli/maven_purifier.py;
+        MAVEN_PURIFIER_CLI = "${../cli}/maven_purifier.py";
+        MAVEN_PURIFIER_RUNTIME_EXPORT = "${../pkgs/build-maven-project/export-runtime.py}";
       }
       ''
-        python3 ${./cli/test_maven_purifier.py}
+        python3 -B -m unittest discover -s ${./cli} -p 'test_*.py'
         python3 -B -m unittest discover -s ${./real-world} -p 'test_*.py'
         touch $out
       '';
@@ -360,10 +440,22 @@ let
         cp ${../extension/src/io/github/nixpurifiers/maven/RecordingEventSpy.java} src/RecordingEventSpy.java
         cp ${./extension/io/github/nixpurifiers/maven/RecordingEventSpyTest.java} src/RecordingEventSpyTest.java
         cp ${../extension/src/io/github/nixpurifiers/maven/LockedReplayParticipant.java} src/LockedReplayParticipant.java
+        cp ${../extension/src/io/github/nixpurifiers/maven/DocumentationCapture.java} src/DocumentationCapture.java
+        cp ${../extension/src/io/github/nixpurifiers/maven/DocumentationLinks.java} src/DocumentationLinks.java
         cp ${./extension/io/github/nixpurifiers/maven/LockedReplayParticipantTest.java} src/LockedReplayParticipantTest.java
+        cp ${./extension/io/github/nixpurifiers/maven/DocumentationLinksTest.java} src/DocumentationLinksTest.java
+        cp ${./extension/io/github/nixpurifiers/maven/DocumentationCaptureTest.java} src/DocumentationCaptureTest.java
+        cp ${../extension/src/io/github/nixpurifiers/maven/ProjectedVersions.java} src/ProjectedVersions.java
+        cp ${./extension/io/github/nixpurifiers/maven/ProjectedVersionsTest.java} src/ProjectedVersionsTest.java
+        cp ${../extension/src/io/github/nixpurifiers/maven/DefaultTimestampMojo.java} src/DefaultTimestampMojo.java
+        cp ${./extension/io/github/nixpurifiers/maven/DefaultTimestampMojoTest.java} src/DefaultTimestampMojoTest.java
         javac -Xlint:-deprecation -d classes -cp "${pkgs.maven}/maven/lib/*" src/*.java
         java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.RecordingEventSpyTest
         java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.LockedReplayParticipantTest
+        java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.DocumentationLinksTest
+        java -cp "classes:${pkgs.maven}/maven/lib/*:${pkgs.maven}/maven/boot/*" io.github.nixpurifiers.maven.DocumentationCaptureTest
+        java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.ProjectedVersionsTest
+        java -cp "classes:${pkgs.maven}/maven/lib/*" io.github.nixpurifiers.maven.DefaultTimestampMojoTest
         touch $out
       '';
 
@@ -377,8 +469,9 @@ let
       ''
         jar=${extension}/share/java/maven-purifier-extension.jar
         jar tf $jar | grep -qx 'io/github/nixpurifiers/maven/RecordingEventSpy.class'
+        jar tf $jar | grep -qx 'io/github/nixpurifiers/maven/CompatibleEventSpy.class'
         index=$(jar xf $jar META-INF/sisu/javax.inject.Named && cat META-INF/sisu/javax.inject.Named)
-        grep -qx io.github.nixpurifiers.maven.RecordingEventSpy <<<"$index"
+        grep -qx io.github.nixpurifiers.maven.CompatibleEventSpy <<<"$index"
         grep -qx io.github.nixpurifiers.maven.ProjectedModelProcessor <<<"$index"
         grep -qx io.github.nixpurifiers.maven.ProjectedLifecycleParticipant <<<"$index"
         ${cli}/bin/maven-purifier --help | grep -q 'maven-purifier prefetch'
@@ -435,7 +528,14 @@ in
   multi-app = multi.packages.app;
   multi-core = multi.packages.core;
   multi-tests = multi.tests;
+  unicode-paths = multi.tests.overrideAttrs (old: {
+    name = "maven-unicode-path-tests";
+    preBuild = (old.preBuild or "") + ''
+      cp ${./unicode-paths/UnicodePathTest.java} app/src/test/java/example/multi/app/UnicodePathTest.java
+    '';
+  });
   bundle-release = bundle.packages.bundle;
+  jdk-toolchains = toolchainCheck;
   online-goal = pkgs.runCommand "maven-purifier-online-goal" { } ''
     bom=${onlineGoal.packages.online-goal.artifacts."online-goal-cyclonedx.json"}
     grep -q 'commons-lang3' "$bom"

@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -16,6 +17,15 @@ args = parser.parse_args()
 root = Path(__file__).resolve().parents[2]
 cli = str(args.cli.resolve())
 env = dict(os.environ, JAVA_HOME=str(args.jdk.resolve()))
+java_probe = subprocess.run([str(args.jdk.resolve() / 'bin/java'), '-XshowSettings:properties', '-version'],
+                            capture_output=True, text=True, check=True)
+java_specification = re.search(r'^\s*java.specification.version = (\S+)\s*$',
+                               java_probe.stderr, re.MULTILINE)
+assert java_specification, 'Selected Java runtime did not report its specification version'
+expected_java_major = java_specification.group(1).removeprefix('1.')
+if args.version.startswith(("3.1.", "3.2.")):
+    # These wrappers may still name the retired HTTP endpoint of Central.
+    env.setdefault("MAVEN_PURIFIER_CENTRAL_MIRROR", "https://repo.maven.apache.org/maven2/")
 snapshot = json.loads(subprocess.check_output(['nix', 'flake', 'archive', '--json',
     '--no-update-lock-file', str(root)], text=True))['path']
 snapshot = str(Path(snapshot).resolve(strict=True))
@@ -78,12 +88,14 @@ with tempfile.TemporaryDirectory(prefix="maven-compatibility-") as tmp:
     initial = lockfile.read_bytes()
     data = json.loads(initial)
     assert data["maven"]["version"] == args.version
-    assert data["javaMajor"] == ("8" if args.version.startswith(("2.", "3.0.")) else "17")
+    assert data["javaMajor"] == expected_java_major
     run(cli, "lock", "--force")
     assert lockfile.read_bytes() == initial, "a relock changed the pinned resolution"
     run(cli, "prefetch")
-    run(str(project / ".maven-purifier/bin/mvn"), "-B", "clean", "install",
-        extra_env={"JAVA_HOME": "/deliberately-absent-jdk"})
+    run(str(project / ".maven-purifier/bin/mvn"), "-B", "clean", "install")
+    invalid_runtime = subprocess.run([str(project / '.maven-purifier/bin/mvn'), '--version'],
+        cwd=project, env=env | {'JAVA_HOME': '/deliberately-absent-jdk'}, capture_output=True)
+    assert invalid_runtime.returncode != 0, 'Local launcher silently replaced the caller runtime'
     # This also checks that prefetch's generated config doesn't stale the lock.
     run(cli, "prefetch")
     expression = """

@@ -5,14 +5,16 @@ import java.io.IOException;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.LinkedHashSet;
+import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
-import javax.inject.Named;
-import javax.inject.Singleton;
 import org.apache.maven.eventspy.AbstractEventSpy;
 import org.apache.maven.execution.MavenExecutionResult;
 import org.eclipse.aether.RepositoryEvent;
@@ -46,21 +48,24 @@ import org.eclipse.aether.repository.RemoteRepository;
  * locked ones, and when the build fails after files could not be resolved offline, it names them
  * and the commands that add them.
  */
-@Named("maven-purifier")
-@Singleton
 public class RecordingEventSpy extends AbstractEventSpy {
 
   private Writer out;
+  private Path downloadDirectory;
   private String lockedMaven;
   private final Set<String> unresolved = new LinkedHashSet<>();
+  private final Map<org.apache.maven.plugin.MojoExecution, DocumentationCapture.Invocation> documentation = new IdentityHashMap<>();
+  private final Set<Path> producerDirectories = new LinkedHashSet<>();
 
   @Override
   public void init(Context context) throws IOException {
     String record = System.getenv("MAVEN_PURIFIER_RECORD");
     if (record != null && !record.isEmpty()) {
+      Path recordPath = Paths.get(record).toAbsolutePath();
+      downloadDirectory = recordPath.resolveSibling(recordPath.getFileName() + ".downloads");
       out =
           Files.newBufferedWriter(
-              Paths.get(record),
+              recordFile(recordPath, System.getenv("MAVEN_PURIFIER_PHASE")),
               StandardCharsets.UTF_8,
               StandardOpenOption.CREATE,
               StandardOpenOption.APPEND);
@@ -85,10 +90,51 @@ public class RecordingEventSpy extends AbstractEventSpy {
     }
   }
 
+  // Each recorder owns its writer. Maven can initialize multiple spies, and
+  // Invoker children inherit the record destination; synchronized methods do
+  // not serialize either independent instances or JVMs. Keep the first
+  // recorder in the original file; subsequent instances get private files
+  // grouped by capture phase. The separate runtime recorder goal still
+  // appends its root-project runtime events to the original file.
+  static Path recordFile(Path record, String phase) throws IOException {
+    try {
+      return Files.createFile(record);
+    } catch (FileAlreadyExistsException existing) {
+      String group = "development".equals(phase) ? "development" : "build";
+      Path parts = record.resolveSibling(record.getFileName() + ".parts").resolve(group);
+      Files.createDirectories(parts);
+      return Files.createTempFile(parts, "record-", ".jsonl");
+    }
+  }
+
   @Override
   public synchronized void onEvent(Object event) throws IOException {
+    prepareReplay(event);
     if (out == null) {
       guard(event);
+      return;
+    }
+    if (event instanceof org.apache.maven.execution.ExecutionEvent) {
+      org.apache.maven.execution.ExecutionEvent execution = (org.apache.maven.execution.ExecutionEvent) event;
+      try {
+        if (execution.getType() == org.apache.maven.execution.ExecutionEvent.Type.MojoStarted) {
+          org.apache.maven.project.MavenProject project = execution.getProject();
+          if (project != null && project.getBuild() != null && project.getBuild().getDirectory() != null) {
+            producerDirectories.add(Paths.get(project.getBuild().getDirectory()).toAbsolutePath().normalize());
+          }
+          DocumentationCapture.Invocation invocation = DocumentationCapture.started(execution);
+          if (invocation != null) documentation.put(execution.getMojoExecution(), invocation);
+        } else if (execution.getType() == org.apache.maven.execution.ExecutionEvent.Type.MojoSucceeded) {
+          DocumentationCapture.Invocation invocation = documentation.remove(execution.getMojoExecution());
+          if (invocation != null) invocation.write(out);
+        } else if (execution.getType() == org.apache.maven.execution.ExecutionEvent.Type.MojoFailed
+            || "MojoSkipped".equals(execution.getType().name())) {
+          documentation.remove(execution.getMojoExecution());
+        }
+      } catch (Exception error) {
+        out.write("{\"event\":\"javadoc-error\",\"message\":" + DocumentationCapture.json(error.toString()) + "}\n");
+        out.flush();
+      }
       return;
     }
     if (!(event instanceof RepositoryEvent)) {
@@ -98,25 +144,42 @@ public class RecordingEventSpy extends AbstractEventSpy {
     if (e.getException() != null || e.getFile() == null) {
       return;
     }
-    switch (e.getType()) {
-      case ARTIFACT_DOWNLOADED:
-        if (remote(e.getRepository()) != null) {
-          download(remote(e.getRepository()), artifactPath(e.getArtifact()), e);
-        }
-        break;
-      case METADATA_DOWNLOADED:
-        if (remote(e.getRepository()) != null) {
-          download(remote(e.getRepository()), metadataPath(e.getMetadata()), e);
-        }
-        break;
-      case METADATA_RESOLVED:
-        resolved(e);
-        break;
-      case ARTIFACT_INSTALLED:
-        install(e.getArtifact(), e);
-        break;
-      default:
-        break;
+    try {
+      switch (e.getType()) {
+        case ARTIFACT_DOWNLOADED:
+          if (remote(e.getRepository()) != null) {
+            download(remote(e.getRepository()), artifactPath(e.getArtifact()), e);
+          }
+          break;
+        case METADATA_DOWNLOADED:
+          if (remote(e.getRepository()) != null) {
+            download(remote(e.getRepository()), metadataPath(e.getMetadata()), e);
+          }
+          break;
+        case METADATA_RESOLVED:
+          resolved(e);
+          break;
+        case ARTIFACT_INSTALLED:
+          install(e.getArtifact(), e);
+          break;
+        default:
+          break;
+      }
+    } catch (IOException error) {
+      out.write("{\"event\":\"record-error\",\"message\":" + json(error.toString()) + "}\n");
+      out.flush();
+    }
+  }
+
+  // Both Maven 3 and Maven 4 dispatch the request before creating its
+  // repository session. A nested Invoker request can be online even though
+  // its parent resolver is offline: afterProjectsRead clears only the
+  // parent's execution flag so requiresOnline goals can run. Establish the
+  // child's resolver flag before Maven snapshots this request too.
+  static void prepareReplay(Object event) {
+    if (event instanceof org.apache.maven.execution.MavenExecutionRequest
+        && Boolean.parseBoolean(System.getProperty("maven-purifier.replay"))) {
+      ((org.apache.maven.execution.MavenExecutionRequest) event).setOffline(true);
     }
   }
 
@@ -170,6 +233,19 @@ public class RecordingEventSpy extends AbstractEventSpy {
 
   private void download(RemoteRepository repository, String path, RepositoryEvent e)
       throws IOException {
+    // An install later in this reactor can replace this very repository path.
+    // Preserve the successful transfer's bytes before returning to Maven.
+    Path snapshot;
+    try {
+      Files.createDirectories(downloadDirectory);
+      snapshot = Files.createTempFile(downloadDirectory, "download-", ".bin");
+      Files.copy(e.getFile().toPath(), snapshot, StandardCopyOption.REPLACE_EXISTING);
+    } catch (IOException error) {
+      out.write("{\"event\":\"download-error\",\"url\":" + json(url(repository, path))
+          + ",\"message\":" + json(error.toString()) + "}\n");
+      out.flush();
+      return;
+    }
     out.write(
         "{\"event\":\"download\",\"repository\":"
             + json(repository.getId())
@@ -179,6 +255,9 @@ public class RecordingEventSpy extends AbstractEventSpy {
             + json(url(repository, path))
             + ",\"file\":"
             + json(e.getFile().getAbsolutePath())
+            + repositoryFields(e)
+            + ",\"snapshot\":"
+            + json(snapshot.toAbsolutePath().toString())
             + "}\n");
     out.flush();
   }
@@ -186,11 +265,29 @@ public class RecordingEventSpy extends AbstractEventSpy {
   // A metadata file the build read, whether it was downloaded now or lay in
   // the local repository already, as the metadata of the previous lock does.
   private void resolved(RepositoryEvent e) throws IOException {
-    out.write("{\"event\":\"resolved\",\"file\":" + json(e.getFile().getAbsolutePath()) + "}\n");
+    out.write("{\"event\":\"resolved\",\"file\":" + json(e.getFile().getAbsolutePath())
+        + repositoryFields(e) + "}\n");
     out.flush();
   }
 
   private void install(Artifact a, RepositoryEvent e) throws IOException {
+    Files.createDirectories(downloadDirectory);
+    Path snapshot = Files.createTempFile(downloadDirectory, "install-", ".bin");
+    Files.copy(e.getFile().toPath(), snapshot, StandardCopyOption.REPLACE_EXISTING);
+    String source = a.getFile() == null ? "" : a.getFile().getAbsolutePath();
+    String sourceHash = source.isEmpty() ? "" : contentHash(a.getFile().toPath());
+    String output = "";
+    if (!source.isEmpty()) {
+      Path input = a.getFile().toPath().toAbsolutePath().normalize();
+      // installAtEnd can install another reactor project's artifact from the
+      // last project's mojo; use observed project outputs, not that thread's
+      // current project. The CLI additionally confines these to its build copy.
+      for (Path directory : producerDirectories) {
+        if (input.startsWith(directory) && directory.toString().length() > output.length()) {
+          output = directory.toString();
+        }
+      }
+    }
     out.write(
         "{\"event\":\"install\",\"groupId\":"
             + json(a.getGroupId())
@@ -204,8 +301,43 @@ public class RecordingEventSpy extends AbstractEventSpy {
             + json(a.getExtension())
             + ",\"file\":"
             + json(e.getFile().getAbsolutePath())
+            + repositoryFields(e)
+            + ",\"snapshot\":" + json(snapshot.toAbsolutePath().toString())
+            + ",\"source\":" + json(source)
+            + ",\"sourceHash\":" + json(sourceHash)
+            + ",\"producerDirectory\":" + json(output)
             + "}\n");
     out.flush();
+  }
+
+  private static String contentHash(Path file) throws IOException {
+    try {
+      java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+      try (java.io.InputStream input = Files.newInputStream(file)) {
+        byte[] buffer = new byte[8192];
+        int count;
+        while ((count = input.read(buffer)) != -1) digest.update(buffer, 0, count);
+      }
+      return "sha256-" + java.util.Base64.getEncoder().encodeToString(digest.digest());
+    } catch (java.security.NoSuchAlgorithmException error) {
+      throw new IOException("SHA-256 is unavailable", error);
+    }
+  }
+
+  private static String repositoryFields(RepositoryEvent event) throws IOException {
+    org.eclipse.aether.repository.LocalRepository local =
+        event.getRepository() instanceof org.eclipse.aether.repository.LocalRepository
+            ? (org.eclipse.aether.repository.LocalRepository) event.getRepository()
+            : event.getSession().getLocalRepository();
+    if (local == null) {
+      throw new IOException("repository event has no local repository: " + event.getFile());
+    }
+    Path repository = local.getBasedir().toPath().toAbsolutePath().normalize();
+    Path file = event.getFile().toPath().toAbsolutePath().normalize();
+    if (!file.startsWith(repository)) {
+      throw new IOException("repository event file is outside its local repository: " + file);
+    }
+    return ",\"localRepository\":" + json(repository.toString());
   }
 
   static String url(RemoteRepository repository, String path) {

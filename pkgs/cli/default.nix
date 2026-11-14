@@ -41,7 +41,6 @@ let
       ../../lib-overlays
       ../../pkg-overlays
       ../../pkgs
-      ../../nix
       ../../cli
       ../../extension
       ../../tests
@@ -71,6 +70,9 @@ stdenvNoCC.mkDerivation {
       exit 1
     fi
     install -Dm644 cli/maven_purifier.py $out/libexec/maven-purifier/maven_purifier.py
+    install -Dm644 cli/javadoc_resources.py $out/libexec/maven-purifier/javadoc_resources.py
+    install -Dm644 cli/prefetch_state.py $out/libexec/maven-purifier/prefetch_state.py
+    install -Dm644 cli/local_maven.py $out/libexec/maven-purifier/local_maven.py
     makeWrapper ${python3.interpreter} $out/bin/maven-purifier \
       --add-flags $out/libexec/maven-purifier/maven_purifier.py \
       --prefix PYTHONPATH : ${purifier.projectInputsTool} \

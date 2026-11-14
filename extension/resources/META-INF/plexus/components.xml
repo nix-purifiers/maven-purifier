@@ -1,8 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- SPDX-License-Identifier: MIT -->
-<!-- Maven 3.0 uses Plexus registrations rather than the later Sisu index. -->
+<!-- Older Maven containers use Plexus registrations rather than the Sisu index. -->
 <component-set>
   <components>
+    <component>
+      <role>org.apache.maven.eventspy.EventSpy</role>
+      <role-hint>maven-purifier</role-hint>
+      <implementation>io.github.nixpurifiers.maven.CompatibleEventSpy</implementation>
+    </component>
+    <component>
+      <role>org.apache.maven.AbstractMavenLifecycleParticipant</role>
+      <role-hint>purifier-locked-replay</role-hint>
+      <implementation>io.github.nixpurifiers.maven.LockedReplayParticipant</implementation>
+    </component>
     <component>
       <role>org.apache.maven.model.building.ModelProcessor</role>
       <role-hint>default</role-hint>

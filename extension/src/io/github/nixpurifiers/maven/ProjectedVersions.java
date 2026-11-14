@@ -28,6 +28,9 @@ public final class ProjectedVersions {
   public static Properties forSource(File source) throws IOException {
     Properties versions = new Properties();
     if (source == null) return versions;
+    if (Boolean.parseBoolean(System.getProperty("maven-purifier.externalInputs"))) {
+      return external(source);
+    }
     File absolute = source.getAbsoluteFile();
     for (File directory = absolute.getParentFile(); directory != null; directory = directory.getParentFile()) {
       File configuration = new File(directory, ".maven-purifier/project-inputs.properties");
@@ -41,6 +44,51 @@ public final class ProjectedVersions {
         versions.load(input);
       }
       return versions;
+    }
+    return versions;
+  }
+
+  private static File absoluteProperty(String name) throws IOException {
+    String value = System.getProperty(name);
+    if (value == null || !new File(value).isAbsolute()) {
+      throw new IOException("missing absolute external Maven view association: " + name);
+    }
+    return new File(value).getCanonicalFile();
+  }
+
+  private static Properties external(File source) throws IOException {
+    File root = absoluteProperty("maven-purifier.root");
+    File configuration = absoluteProperty("maven-purifier.inputs");
+    File repository = absoluteProperty("maven-purifier.repository");
+    if (configuration.toPath().startsWith(root.toPath())
+        || Files.isSymbolicLink(new File(System.getProperty("maven-purifier.inputs")).toPath())) {
+      throw new IOException("external project inputs must be a frozen file outside the source tree");
+    }
+    byte[] bytes = Files.readAllBytes(configuration.toPath());
+    try {
+      byte[] hash = java.security.MessageDigest.getInstance("SHA-256").digest(bytes);
+      StringBuilder hex = new StringBuilder();
+      for (byte value : hash) {
+        hex.append(Character.forDigit((value & 255) >>> 4, 16));
+        hex.append(Character.forDigit(value & 15, 16));
+      }
+      if (!hex.toString().equals(System.getProperty("maven-purifier.inputsHash"))) {
+        throw new IOException("external project input metadata has drifted");
+      }
+    } catch (java.security.NoSuchAlgorithmException error) {
+      throw new IOException("SHA-256 is unavailable", error);
+    }
+    Properties versions = new Properties();
+    java.nio.file.Path path = source.getCanonicalFile().toPath();
+    if (!path.startsWith(root.toPath()) || path.startsWith(repository.toPath())) return versions;
+    // Invoker can select another local repository inside the build tree.
+    // Maven CLI sets these user properties before models are constructed.
+    String activeRepository = System.getProperty("maven.repo.local");
+    if (activeRepository != null && path.startsWith(new File(activeRepository).getCanonicalFile().toPath())) {
+      return versions;
+    }
+    try (Reader input = new java.io.StringReader(new String(bytes, StandardCharsets.UTF_8))) {
+      versions.load(input);
     }
     return versions;
   }

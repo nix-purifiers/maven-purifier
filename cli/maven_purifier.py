@@ -25,11 +25,12 @@
 
   maven-purifier prefetch [--lockfile FILE]
       Fetches everything the lockfile lists into the Nix store, behind a
-      garbage-collector root in .maven-purifier/ at the build root, and
+      garbage-collector root in your user state directory, and
       points Maven at it: it writes lines of its own at the end of
       .mvn/maven.config, so that `mvn`, `./mvnw` and an editor that reads
       that file resolve offline from the locked files. The locked Maven is
-      .maven-purifier/bin/mvn, and the locked JDK .maven-purifier/jdk.
+      .maven-purifier/bin/mvn. Local builds keep your existing Java runtime;
+      The runtime alias also lives outside the project in user state.
 
   maven-purifier publish [--lockfile FILE] [--repository-id ID --url URL] [ARG...]
       Builds the release with Nix and deploys it with the locked Maven and
@@ -62,6 +63,7 @@ import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
 import zipfile
+import javadoc_resources
 from pathlib import Path
 from typing import NoReturn
 
@@ -71,7 +73,7 @@ STATE_DIR = ".maven-purifier"
 CENTRAL = "https://repo.maven.apache.org/maven2/"
 
 # The line of .mvn/maven.config from which on `prefetch` writes lines of
-# its own (nix/lib/maven-config-marker.nix). It defines a property that
+# its own (lib-overlays/default/maven-config-marker.nix). It defines a property that
 # nothing reads, since maven.config has no comments.
 PREFETCH_MARKER = "-Dmaven-purifier.prefetched=true"
 
@@ -129,7 +131,18 @@ def seed_legacy_recorder(repo):
         target / "maven-purifier-legacy-recorder-1.jar", "w"
     ) as output:
         for entry in source.infolist():
-            if entry.filename == "META-INF/maven/plugin.xml" or (
+            if entry.filename == "META-INF/maven/plugin.xml":
+                # The local legacy capture bundle contains only its recorder.
+                # Pure-build preparation goals have separate implementations.
+                descriptor = ET.fromstring(source.read(entry.filename))
+                mojos = descriptor.find("mojos")
+                if mojos is None:
+                    fail("the legacy recorder descriptor has no goals")
+                for mojo in list(mojos):
+                    if mojo.findtext("goal") != "record":
+                        mojos.remove(mojo)
+                output.writestr(entry, ET.tostring(descriptor, encoding="utf-8", xml_declaration=True))
+            elif (
                 entry.filename.startswith("io/github/nixpurifiers/maven/LegacyRecorderMojo")
                 and entry.filename.endswith(".class")
             ):
@@ -272,13 +285,13 @@ def definition_files(root):
     """The files that define the build, as relative path strings in sorted order.
 
     They are every regular file named pom.xml, and every regular file under
-    .mvn/ at the build root. Directories in SKIPPED_DIRS, directories whose
-    names start with "result", and symbolic links take no part.
-    nix/lib/definition-hash.nix walks the build root by the same rules.
+    .mvn/ at the build root. Directories in SKIPPED_DIRS and symbolic links
+    take no part.
+    lib-overlays/default/definition-hash.nix walks the build root by the same rules.
     """
     files = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIPPED_DIRS and not d.startswith("result")]
+        dirnames[:] = [d for d in dirnames if d not in SKIPPED_DIRS]
         rel = Path(dirpath).relative_to(root)
         for name in filenames:
             path = Path(dirpath) / name
@@ -297,7 +310,7 @@ def definition_hash(root, goals):
     each definition file. For .mvn/maven.config the hash covers the build's
     own lines (build_config_lines) joined by newlines, so the lines that
     `prefetch` writes take no part. Nix computes the same text from the
-    build root (nix/lib/definition-hash.nix), so a sandboxed build can tell
+    build root (lib-overlays/default/definition-hash.nix), so a sandboxed build can tell
     a stale lock at evaluation time.
     """
     lines = ["goals " + " ".join(goals)]
@@ -446,47 +459,50 @@ def unpack_maven(archive, dest):
 
 
 def java_home():
-    home = os.environ.get("JAVA_HOME") or os.environ.get("MAVEN_PURIFIER_DEFAULT_JAVA_HOME")
+    """Select the existing local runtime without realizing or substituting a Nix SDK."""
+    home = os.environ.get("JAVA_HOME")
+    if home:
+        home = str(Path(home).expanduser().absolute())
+        java_version(home)
+        return home
+    executable = shutil.which("java")
+    if executable is None:
+        fail("set JAVA_HOME to an existing Java runtime or put java on PATH")
+    properties = java_properties(executable)
+    if not properties.get("java.version"):
+        fail(f"could not read the version of the existing runtime {executable}")
+    home = properties.get("java.home")
     if not home:
-        fail("set JAVA_HOME to the JDK that runs Maven")
+        fail(f"could not read java.home from the existing runtime {executable}")
+    # Java 8 reports its nested JRE directory even when java belongs to a JDK.
+    path = Path(home)
+    if path.name == "jre" and (path.parent / "bin/javac").is_file():
+        return str(path.parent)
     return home
 
 
-def locked_jdk(major):
-    """The JAVA_HOME of nixpkgs' headless JDK of a Java major version, from the nixpkgs of this flake."""
-    expression = f"""
-      let
-        flake = builtins.getFlake ("path:" + builtins.getEnv "MAVEN_PURIFIER_FLAKE");
-        pkgs = import flake.inputs.nixpkgs {{ system = builtins.currentSystem; }};
-      in
-      pkgs.javaPackages.compiler."openjdk{major}".headless
-    """
+def java_properties(executable):
     try:
-        jdk = subprocess.run(
-            ["nix", "build", "--impure", "--no-link", "--print-out-paths", "--expr", expression],
+        out = subprocess.run(
+            [str(executable), "-XshowSettings:properties", "-version"],
             check=True,
-            stdout=subprocess.PIPE,
+            capture_output=True,
             text=True,
-        ).stdout.strip()
-    except subprocess.CalledProcessError:
-        fail(f"nixpkgs has no headless JDK {major}, the Java major version of the lock")
-    # The home of nixpkgs' OpenJDK is its lib/openjdk. On darwin the JDK is
-    # Azul Zulu, whose store path is the home, as its `home` attribute says.
-    home = f"{jdk}/lib/openjdk"
-    return home if os.path.isdir(home) else jdk
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        fail(f"cannot run the existing Java runtime {executable}: {error}")
+    properties = {}
+    for line in (out.stderr + "\n" + out.stdout).splitlines():
+        key, sep, value = line.strip().partition(" = ")
+        if sep:
+            properties[key] = value
+    return properties
 
 
 def java_version(home):
-    out = subprocess.run(
-        [f"{home}/bin/java", "-XshowSettings:properties", "-version"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    for line in out.stderr.splitlines():
-        key, sep, value = line.strip().partition(" = ")
-        if sep and key == "java.version":
-            return value
+    version = java_properties(f"{home}/bin/java").get("java.version")
+    if version:
+        return version
     fail(f"could not read the version of the JDK at {home}")
 
 
@@ -639,6 +655,30 @@ def write_run_settings(settings, path, legacy=False):
     path.write_text(ET.tostring(settings, encoding="unicode") + "\n")
 
 
+def distribution_proxy(mvn, caller_settings):
+    """Bridge proxy environment variables for children of this private Maven.
+
+    Invoker supplies its own user settings, so the parent's generated -s file
+    cannot supply its proxy. Only this lock run's unpacked distribution is
+    changed; explicit caller or distribution proxy settings take precedence.
+    """
+    if any(local_name(child.tag) == "proxies" for child in caller_settings):
+        return
+    path = mvn.parent.parent / "conf" / "settings.xml"
+    settings = ET.parse(path).getroot()
+    qualify = qualifier(settings)
+    proxies = next((child for child in settings if local_name(child.tag) == "proxies"), None)
+    if proxies is not None and len(proxies):
+        return
+    inherited = env_proxies(qualify)
+    if not inherited:
+        return
+    if proxies is None:
+        proxies = ET.SubElement(settings, qualify("proxies"))
+    proxies.extend(inherited)
+    path.write_text(ET.tostring(settings, encoding="unicode") + "\n")
+
+
 def offline_settings(lock_data, repo, path):
     """Writes the settings of a prefetched Maven: the recorded settings, offline, on the locked repository."""
     settings = ET.fromstring(lock_data.get("settings") or "<settings/>")
@@ -658,8 +698,12 @@ def offline_settings(lock_data, repo, path):
 def copy_build(root, dest):
     """Copies the build root for a lock run, without build outputs and without the lines of `prefetch`."""
 
-    def ignore(_dir, names):
-        return [n for n in names if n in SKIPPED_DIRS or n.startswith("result")]
+    # Nix's default output links live at the build root. Ordinary source
+    # directories such as org.junit.experimental.results must be retained.
+    def ignore(directory, names):
+        return [n for n in names if n in SKIPPED_DIRS or (
+            Path(directory) == Path(root) and n.startswith("result") and (Path(directory) / n).is_symlink()
+        )]
 
     shutil.copytree(root, dest, symlinks=True, ignore=ignore)
     config = dest / ".mvn" / "maven.config"
@@ -668,14 +712,206 @@ def copy_build(root, dest):
 
 
 def read_record(path):
-    with open(path) as f:
-        return [json.loads(line) for line in f if line.strip()]
+    # Children and later Maven invocations own separate writers. Read build
+    # shards before development shards so the build prefix stays stable when
+    # the development pass adds files. Within one process, line order remains
+    # the native repository-event order.
+    parts = path.with_name(path.name + ".parts")
+    sources = [path, *sorted((parts / "build").glob("*.jsonl")),
+               *sorted((parts / "development").glob("*.jsonl"))]
+    events = []
+    for source in sources:
+        with source.open() as f:
+            events.extend(json.loads(line) for line in f if line.strip())
+    for event in events:
+        if event.get("event") == "record-error":
+            fail(f"cannot record Maven repository inputs: {event.get('message')}")
+        if event.get("event") == "download-error":
+            fail(f"cannot preserve downloaded bytes of {event.get('url')}: {event.get('message')}")
+    return events
+
+
+def repository_path(event, primary):
+    """A resolver file belongs to its event's session, including child Maven."""
+    repository = Path(event.get("localRepository", primary))
+    file = Path(event["file"])
+    if not repository.is_absolute() or not file.is_absolute():
+        fail(f"repository event paths must be absolute: {event}")
+    repository = Path(os.path.abspath(repository))
+    file = Path(os.path.abspath(file))
+    if not file.is_relative_to(repository):
+        fail(f"repository event file is outside its local repository: {file}")
+    return file.relative_to(repository).as_posix()
+
+
+def download_source(event, record):
+    """The transfer's private snapshot, or the verified legacy recorder's file."""
+    if "snapshot" not in event:
+        return Path(event["file"])
+    source = Path(event["snapshot"])
+    owned = record.with_name(record.name + ".downloads").resolve()
+    if not source.is_absolute() or not source.resolve().is_relative_to(owned) or not source.is_file():
+        fail(f"invalid download snapshot for {event.get('url')}: {source}")
+    return source
+
+
+def validated_file_transfers(events, repo, record, initial_sources, project=None, source_root=None):
+    """Prove cache forwarding from captured inputs or observed producer outputs.
+
+    A file repository is a native provider, not an external download URL.
+    Follow immutable byte observations back to a remote transfer, an install,
+    a supplied immutable input, or an unchanged source file. Unknown host
+    cache files and cycles without a provider cannot enter the lock this way.
+    """
+    nodes = {}
+    hashes = {}
+    for index, event in enumerate(events):
+        if event["event"] not in ("download", "install") or "snapshot" not in event:
+            continue
+        repository_path(event, repo)
+        hashes[index] = sri(download_source(event, record))
+        key = (Path(os.path.abspath(event["file"])), hashes[index])
+        nodes.setdefault(key, []).append(index)
+    initial = {Path(os.path.abspath(path)): sri(source) for path, source in initial_sources.items()}
+    proven = set()
+
+    def file_source(event):
+        url = urllib.parse.urlparse(event["url"])
+        if url.netloc not in ("", "localhost") or url.query or url.fragment:
+            fail(f"unsupported file repository URL: {event['url']}")
+        path = Path(urllib.request.url2pathname(url.path))
+        if not path.is_absolute():
+            fail(f"file repository URL must be absolute: {event['url']}")
+        return Path(os.path.abspath(path))
+
+    def supplied(path, digest):
+        if initial.get(path) == digest:
+            return True
+        if project is None or source_root is None or not path.is_relative_to(project):
+            return False
+        relative = path.relative_to(project)
+        if any(part in SKIPPED_DIRS for part in relative.parts):
+            return False
+        original = source_root / relative
+        first = relative.parts[0]
+        if first.startswith("result") and (source_root / first).is_symlink():
+            return False
+        return (original.is_file() and original.resolve().is_relative_to(source_root.resolve())
+                and sri(original) == digest)
+
+    def provider(index, visiting):
+        if index in proven:
+            return True
+        if index in visiting or index not in hashes:
+            return False
+        event = events[index]
+        if event["event"] == "download" and urllib.parse.urlparse(event["url"]).scheme != "file":
+            proven.add(index)
+            return True
+        if event["event"] == "install":
+            if event.get("sourceHash") != hashes[index]:
+                return False
+            source = Path(event.get("source", ""))
+            if not source.is_absolute():
+                return False
+            source = Path(os.path.abspath(source))
+            output = Path(event.get("producerDirectory", ""))
+            if (project is not None and output.is_absolute()
+                    and output.resolve().is_relative_to(project.resolve())
+                    and source.resolve().is_relative_to(output.resolve())):
+                proven.add(index)
+                return True
+        else:
+            source = file_source(event)
+        if supplied(source, hashes[index]) or any(
+            provider(candidate, visiting | {index}) for candidate in nodes.get((source, hashes[index]), [])
+        ):
+            proven.add(index)
+            return True
+        return False
+
+    forwarded = set()
+    for index, event in enumerate(events):
+        if event["event"] == "download" and urllib.parse.urlparse(event["url"]).scheme == "file":
+            if not provider(index, set()):
+                fail(f"file repository input has no captured immutable provider: {event['url']}")
+            forwarded.add(index)
+    return forwarded
+
+
+def captured_downloads(events, repo, record, provided_sources, build_events, file_transfers=()):
+    """Join isolated resolver inputs; one lock path cannot hold conflicting bytes."""
+    downloads = {}
+    download_sources = {}
+    development_paths = set()
+    roots = {}
+    repository_urls = {}
+    for index, e in enumerate(events):
+        if e["event"] != "download":
+            continue
+        if urllib.parse.urlparse(e["url"]).scheme == "file":
+            if index not in file_transfers:
+                fail(f"file repository input has no captured immutable provider: {e['url']}")
+            continue
+        rel = repository_path(e, repo)
+        if rel in provided_sources:
+            if sri(download_source(e, record)) != sri(provided_sources[rel]):
+                fail(f"downloaded input conflicts with the Nix-provided repository file: {rel}")
+            continue
+        found = [rel]
+        # Maven Resolver stores a timestamped SNAPSHOT under its base
+        # version, which the event names, and also under the name it has
+        # in the remote repository. Both copies are the same file.
+        remote_name = e["url"].rsplit("/", 1)[-1]
+        sibling = Path(rel).parent / remote_name
+        if remote_name != Path(rel).name and Path(e["file"]).with_name(remote_name).is_file():
+            found.append(sibling.as_posix())
+        event_root = Path(os.path.abspath(e.get("localRepository", repo)))
+        source = download_source(e, record)
+        for path in found:
+            if path in downloads:
+                identical = sri(source) == sri(download_sources[path])
+                if roots[path] != event_root and not identical:
+                    fail(f"conflicting downloaded bytes in separate Maven repositories: {path}")
+                if identical and e["url"] < downloads[path]:
+                    downloads[path] = e["url"]
+                    download_sources[path] = source
+            else:
+                downloads[path] = e["url"]
+                download_sources[path] = source
+                roots[path] = event_root
+                if index >= build_events:
+                    development_paths.add(path)
+        # Unobserved core-extension fallback below scans only the primary
+        # repository. A child may reuse a repository id for another URL.
+        if Path(os.path.abspath(e.get("localRepository", repo))) == repo:
+            repository_urls.setdefault(e["repository"], e["repositoryUrl"])
+    return downloads, download_sources, development_paths, repository_urls
 
 
 def artifact_key(install):
     classifier = f"-{install['classifier']}" if install["classifier"] else ""
     extension = f".{install['extension']}" if install["extension"] else ""
     return f"{install['artifactId']}{classifier}{extension}"
+
+
+def primary_installs(events, repo):
+    """Only installs into the build's primary repository are its publications.
+
+    Maven Invoker also installs the project into a separate test repository.
+    Those staging copies and test fixtures must not become published modules.
+    Keep download observations independent: a same-GAV remote input is still
+    needed even when the reactor later installs that coordinate.
+    """
+    primary = Path(os.path.abspath(repo))
+    result = []
+    for event in events:
+        if event["event"] != "install":
+            continue
+        target = Path(os.path.abspath(event["file"]))
+        if target.is_relative_to(primary):
+            result.append(dict(event, file=str(target)))
+    return result
 
 
 def declared_downloads(root):
@@ -786,7 +1022,7 @@ def run_maven(mvn, project, env, settings, repo, goals):
     legacy = maven_version_tuple(mvn) < (3, 1, 0)
     if legacy:
         seed_legacy_recorder(repo)
-    command = [str(mvn), "-B", "-s", str(settings), f"-Dmaven.repo.local={repo}"]
+    command = [str(mvn), "-B", "-s", str(settings), f"-Dmaven.repo.local={repo}", f"-Dmaven-purifier.root={project}"]
     if maven_version_tuple(mvn) >= (3, 0, 0):
         command.append(f"-Dmaven.ext.class.path={os.environ['MAVEN_PURIFIER_EXTENSION']}")
     command += [*MAVEN_FLAGS, *goals]
@@ -903,10 +1139,9 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
             info(f"{lock_path} is up to date; pass --force to lock again")
             return
 
-    # A relock keeps the Java major version of the previous lock, on
-    # nixpkgs' JDK of that version, so that JAVA_HOME does not move it. A
-    # first lock runs on JAVA_HOME, or on the JDK of this maven-purifier.
-    home = locked_jdk(previous["javaMajor"]) if previous and previous.get("javaMajor") else java_home()
+    # Capture and relock both use the caller's existing runtime. javaMajor
+    # records that observation; it is not a local SDK selection table.
+    home = java_home()
     with tempfile.TemporaryDirectory(prefix="maven-purifier-lock-") as tmp:
         tmp = Path(tmp)
         url = distribution_url(root)
@@ -914,26 +1149,27 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
         dist_hash, dist_store = prefetch_file(url)
         dist_path = download_path(url)
         mvn = unpack_maven(Path(dist_store), tmp / "maven")
+        distribution_proxy(mvn, settings)
         maven_version = mvn.parent.parent.name.removeprefix("apache-maven-")
         if inputs and maven_version_tuple(mvn) < (3, 0, 0):
             fail("native Nix project inputs currently need Maven 3 or newer; "
                  "older Maven builds can use the Nix builder's projectDependencies argument")
-        if not previous and not os.environ.get("JAVA_HOME") and maven_version_tuple(mvn) < (3, 1, 0):
-            home = os.environ.get("MAVEN_PURIFIER_LEGACY_JAVA_HOME", home)
-
         project = tmp / "project"
         copy_build(root, project)
         repo = tmp / "repository"
         repo.mkdir()
         declared = []
+        initial_sources = {}
         for d in declared_downloads(root):
             info(f"fetching {fetch_url(d['url'])}")
             declared_hash, declared_store = prefetch_file(d["url"])
             target = repo / d["path"]
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(declared_store, target)
+            initial_sources[target] = Path(declared_store)
             declared.append(file_entry(Path(d["path"]).as_posix(), d["url"], declared_hash))
         provided_paths = set()
+        provided_sources = {}
         if inputs:
             import project_inputs
             import jvm_repository
@@ -944,8 +1180,12 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
                 # Catalogs discover native coordinates; Nix identifies their
                 # provider. No caller-supplied version rewrites are involved.
                 jvm_repository.merge(view["repository"], repo)
-                provided_paths.update(path.relative_to(view["repository"]).as_posix()
-                                      for path in view["repository"].rglob("*") if path.is_file())
+                for path in view["repository"].rglob("*"):
+                    if path.is_file():
+                        relative = path.relative_to(view["repository"]).as_posix()
+                        provided_paths.add(relative)
+                        provided_sources[relative] = path
+                        initial_sources[repo / relative] = path
                 for module in json.loads(view["catalog"].read_text())["modules"]:
                     key = module["group"] + ":" + module["name"]
                     if key in selections and selections[key] != module["version"]:
@@ -955,17 +1195,29 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
             (state / "project-inputs.properties").write_text("".join(lines))
         declared_paths = {d["path"] for d in declared}
         seeded = seed_metadata(repo, previous, refresh)
+        seeded.update(javadoc_resources.seed(previous, repo, refresh == "all"))
+        for relative in sorted(seeded):
+            preserved = tmp / "seeded-inputs" / relative
+            preserved.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(repo / relative, preserved)
+            initial_sources[repo / relative] = preserved
         (tmp / "home").mkdir()
         write_run_settings(settings, tmp / "settings.xml", legacy=maven_version_tuple(mvn) < (3, 1, 0))
         record = tmp / "record.jsonl"
 
         env = dict(os.environ)
         env.update({"JAVA_HOME": home, "HOME": str(tmp / "home"), "MAVEN_PURIFIER_RECORD": str(record),
+                    "MAVEN_PURIFIER_PHASE": "build",
                     "MAVEN_PURIFIER_PRESERVED": json.dumps(sorted(declared_paths | seeded | provided_paths))})
         # Plugins that write temporary files write them into the lock run's
         # own directory.
         (tmp / "java-tmp").mkdir()
         maven_opts = [env.get("MAVEN_OPTS", ""), f"-Duser.home={tmp / 'home'}", f"-Djava.io.tmpdir={tmp / 'java-tmp'}"]
+        if maven_version_tuple(mvn) >= (3, 1, 0):
+            # Invoker launches another Maven process: command-line -D options
+            # of the parent are not inherited by that process. Its ordinary
+            # Maven launcher reads MAVEN_OPTS from the inherited environment.
+            maven_opts.append(shlex.quote("-Dmaven.ext.class.path=" + os.environ["MAVEN_PURIFIER_EXTENSION"]))
         if proxy_with_credentials():
             # Java disables Basic authentication to a proxy by default, for
             # HTTPS tunnels and plain requests alike. Maven 3.9's Apache
@@ -983,6 +1235,10 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
         if run_maven(mvn, project, env, tmp / "settings.xml", repo, goals) != 0:
             fail(f"the lock run failed; {lock_path} is unchanged")
         build_events = len(read_record(record)) if record.exists() else 0
+        try:
+            documentation = javadoc_resources.capture(read_record(record)[:build_events], repo, previous, refresh == "all")
+        except (OSError, ValueError) as error:
+            fail(f"cannot lock Javadoc metadata: {error}; {lock_path} is unchanged")
 
         # The development pass: the plugins of the build and the source jars
         # of its dependencies, with the locked Maven, and the default plugins
@@ -993,6 +1249,7 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
         dependency_plugin = "org.apache.maven.plugins:maven-dependency-plugin:2.8" if maven_version_tuple(mvn) < (3, 6, 3) else DEPENDENCY_PLUGIN
         development = [f"{dependency_plugin}:resolve-plugins", f"{dependency_plugin}:sources"]
         info("adding the build's plugins and its dependencies' source jars for development")
+        env["MAVEN_PURIFIER_PHASE"] = "development"
         if run_maven(mvn, project, env, tmp / "settings.xml", repo, development) != 0:
             info("the development pass with the locked Maven failed; the lock leaves out what it would have added")
         editor_maven = os.environ.get("MAVEN_PURIFIER_EDITOR_MAVEN")
@@ -1002,41 +1259,24 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
             editor_hash, editor_store = prefetch_file(maven_url(editor_maven))
             editor_dist = file_entry(download_path(maven_url(editor_maven)), maven_url(editor_maven), editor_hash)
             editor_mvn = unpack_maven(Path(editor_store), tmp / "editor-maven")
+            distribution_proxy(editor_mvn, settings)
             if run_maven(editor_mvn, project, env, tmp / "settings.xml", repo, [f"{DEPENDENCY_PLUGIN}:resolve-plugins"]) != 0:
                 info(f"the development pass with Maven {editor_maven} failed; the editor may miss plugins offline")
 
         events = read_record(record) if record.exists() else []
-        downloads = {}
-        development_paths = set()
-        repository_urls = {}
-        for index, e in enumerate(events):
-            if e["event"] != "download":
-                continue
-            rel = Path(e["file"]).relative_to(repo).as_posix()
-            if rel in provided_paths:
-                continue
-            found = [rel]
-            # Maven Resolver stores a timestamped SNAPSHOT under its base
-            # version, which the event names, and also under the name it has
-            # in the remote repository. Both copies are the same file.
-            remote_name = e["url"].rsplit("/", 1)[-1]
-            sibling = Path(rel).parent / remote_name
-            if remote_name != Path(rel).name and (repo / sibling).is_file():
-                found.append(sibling.as_posix())
-            for path in found:
-                if path not in downloads:
-                    downloads[path] = e["url"]
-                    if index >= build_events:
-                        development_paths.add(path)
-            repository_urls.setdefault(e["repository"], e["repositoryUrl"])
+        forwarded = validated_file_transfers(events, repo, record, initial_sources, project, root)
+        downloads, download_sources, development_paths, repository_urls = captured_downloads(
+            events, repo, record, provided_sources, build_events, forwarded)
 
         # A seeded metadata file stays in the lock while the build reads it.
-        read_metadata = {Path(e["file"]).relative_to(repo).as_posix() for e in events if e["event"] == "resolved"}
+        read_metadata = {repository_path(e, repo) for e in events if e["event"] == "resolved"
+                         and Path(os.path.abspath(e.get("localRepository", repo))) == repo}
         for path in sorted(seeded):
             if path in read_metadata and path not in downloads and (repo / path).is_file():
                 downloads[path] = None
+                download_sources[path] = repo / path
 
-        installs = [e for e in events if e["event"] == "install"]
+        installs = primary_installs(events, repo)
         installed = {Path(e["file"]).relative_to(repo).as_posix() for e in installs}
         # The version and artifact directories of the build's own modules,
         # where installing and deploying write metadata files of their own.
@@ -1070,6 +1310,7 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
             if repository is not None and repository in repository_urls and "SNAPSHOT" not in rel:
                 base_url = str(repository_urls[repository])
                 downloads[rel] = (base_url if base_url.endswith("/") else base_url + "/") + rel
+                download_sources[rel] = path
                 continue
             unrecorded.append(rel)
         if unrecorded:
@@ -1084,16 +1325,16 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
         # serves new contents whenever a version is published, so a fetch
         # pinned by hash would break. The lock holds the contents the
         # resolver read. Every other download is immutable.
-        entries: list[dict] = [file_entry(dist_path, url, dist_hash), *declared]
+        entries: list[dict] = [file_entry(dist_path, url, dist_hash), *declared, *documentation]
         if editor_dist is not None and editor_dist["path"] != dist_path:
             entries.append(dict(editor_dist, development=True))
         for rel, src in sorted(downloads.items()):
             if rel in declared_paths:
                 continue
             if Path(rel).name.startswith("maven-metadata"):
-                entry = {"path": rel, "contents": (repo / rel).read_text()}
+                entry = {"path": rel, "contents": download_sources[rel].read_text()}
             else:
-                entry = file_entry(rel, src, sri(repo / rel))
+                entry = file_entry(rel, src, sri(download_sources[rel]))
             if rel in development_paths:
                 entry["development"] = True
             entries.append(entry)
@@ -1175,6 +1416,22 @@ def run_lock(root, lock_path, goals, settings_file, force, refresh, input_refs=N
 
 def nix_expression(attribute):
     """A Nix expression for an attribute of this flake's buildMavenProject, for the build root and lockfile in the environment."""
+    if attribute == "prefetch":
+        return """
+          let
+            flake = builtins.getFlake ("path:" + builtins.getEnv "MAVEN_PURIFIER_FLAKE");
+            pkgs = import flake.inputs.nixpkgs {
+              system = builtins.currentSystem;
+              overlays = [ flake.overlays.default ];
+            };
+            inputs = pkgs.callPackage (flake.outPath + "/pkgs/build-maven-project/locked-inputs.nix") {
+              inherit (flake.lib) purifier;
+            };
+          in (inputs {
+            src = /. + builtins.getEnv "MAVEN_PURIFIER_ROOT";
+            lockFile = /. + builtins.getEnv "MAVEN_PURIFIER_LOCKFILE";
+          }).prefetch
+        """
     return f"""
       let
         flake = builtins.getFlake ("path:" + builtins.getEnv "MAVEN_PURIFIER_FLAKE");
@@ -1212,86 +1469,146 @@ def write_maven_config(root, lines):
     config.write_text(own + "\n".join([PREFETCH_MARKER, *lines]) + "\n")
 
 
+def local_prefetch_state(root):
+    import prefetch_state
+    try:
+        return prefetch_state.namespace(root)
+    except prefetch_state.StateError as error:
+        fail(str(error))
+
+
 def prefetch(args):
+    import prefetch_state as views
     options = Options(args, values=("--prefetched",))
     if options.rest:
         fail(f"`maven-purifier prefetch` takes no argument {options.rest[0]!r}")
-    root = build_root()
+    root = build_root().resolve()
     lock_path = options.lock_path(root)
-    lock_data = read_lock(lock_path)
-    check_fresh(root, lock_path, lock_data)
-    state = root / STATE_DIR
-    state.mkdir(exist_ok=True)
+    try:
+        with views.project_lock(root, exclusive=True) as project_descriptor:
+            views.reject_legacy(root)
+            lock_data = read_lock(lock_path)
+            check_fresh(root, lock_path, lock_data)
+            authored_lock = lock_path.read_bytes()
+            config = root / ".mvn/maven.config"
+            if config.is_symlink() or config.parent.is_symlink():
+                fail("prefetch cannot replace an authored Maven configuration symlink")
+            original_config = config.read_bytes() if config.exists() else b""
+            prefix, _ = views.split_config(original_config)
+            mode = stat.S_IMODE(config.stat().st_mode) if config.exists() else 0o600
+            host_java = java_home()
+            intent = {"format": views.FORMAT, "projectRoot": str(root),
+                      "lockHash": lock_data["lockHash"], "definitionHash": lock_data["definitionHash"],
+                      "observedRuntimeHome": str(Path(host_java).resolve())}
+            generation = views.operation(root, intent)
+            supplied = "--prefetched" in options.values
+            if supplied:
+                prefetched = Path(options.values["--prefetched"]).resolve(strict=True)
+            else:
+                info(f"fetching what {lock_path.name} lists into the Nix store")
+                prefetched = Path(nix_build(root, lock_path, "prefetch", generation / "prefetch")).resolve()
+            def retain(path, role):
+                # --prefetched is also used inside Nix builders with no
+                # daemon. Its caller owns the whole supplied tool lifetime.
+                if supplied:
+                    return {"role": role, "target": str(Path(path).resolve()), "lifetime": "provider-owned"}
+                return views.anchor(generation, path, role)
 
-    # `--prefetched` names a prefetch that is built already, as the check of
-    # the offline loop passes one built in the sandbox.
-    if "--prefetched" in options.values:
-        prefetched = Path(options.values["--prefetched"]).resolve()
-    else:
-        info(f"fetching what {lock_path.name} lists into the Nix store")
-        prefetched = Path(nix_build(root, lock_path, "prefetch", state / "prefetch"))
+            roots = [retain(prefetched, "provided-prefetch" if supplied else "prefetch")]
+            roots.append(retain(host_java, "observed-caller-runtime"))
+            extension = Path(os.environ["MAVEN_PURIFIER_EXTENSION"])
+            roots.append(retain(extension, "recording-extension"))
+            helper = Path(__file__).with_name("local_maven.py")
+            # Anchor before exposing even the stable bootstrap. Existing
+            # bootstraps keep their exact earlier helper and interpreter.
+            roots.append(retain(helper, "candidate-launch-helper"))
+            roots.append(retain(sys.executable, "candidate-helper-interpreter"))
+            if views.store_target(helper) is None or views.store_target(sys.executable) is None:
+                fail("prefetch needs the immutable installed launch helper and interpreter")
 
-    # Maven writes tracking files next to what it reads and installs into
-    # the local repository, and Maven 3.10 treats a file as absent when its
-    # real path differs from its path in the repository, so the repository
-    # is a writable copy of the one in the store.
-    repo = state / "repository"
-    stamp = state / "repository.source"
-    source = str((prefetched / "repository").resolve())
-    if not (stamp.exists() and stamp.read_text() == source and repo.is_dir()):
-        if repo.exists():
-            shutil.rmtree(repo)
-        shutil.copytree(source, repo, symlinks=False, copy_function=shutil.copyfile)
-        # copytree copies the read-only mode of each directory in the store,
-        # which leaves no room for Maven's lock and tracking files.
-        for directory, _, _ in os.walk(repo):
-            os.chmod(directory, 0o755)
-        stamp.write_text(source)
+            repo = generation / "repository"
+            shutil.copytree(prefetched / "repository", repo, symlinks=False, copy_function=shutil.copyfile)
+            for directory, _, _ in os.walk(repo):
+                os.chmod(directory, 0o755)
+            settings = generation / "settings.xml"
+            offline_settings(lock_data, repo, settings)
+            settings.chmod(0o600)
+            inputs = generation / "project-inputs.properties"
+            input_source = prefetched / "project-inputs.properties"
+            views.atomic_write(inputs, input_source.read_bytes() if input_source.is_file() else b"")
+            toolchains = None
+            if (prefetched / "toolchains.xml").is_file():
+                toolchains = generation / "toolchains.xml"
+                views.atomic_write(toolchains, (prefetched / "toolchains.xml").read_bytes())
+                for element in ET.parse(toolchains).getroot().iter():
+                    if local_name(element.tag) == "jdkHome" and element.text:
+                        roots.append(retain(element.text.strip(), "explicit-toolchain-runtime"))
 
-    offline_settings(lock_data, repo, state / "settings.xml")
-    # The core model adapters discover this file from each original POM,
-    # including IDE builds. The generated metadata remains rooted in Nix.
-    selection = state / "project-inputs.properties"
-    if selection.exists() or selection.is_symlink():
-        selection.unlink()
-    if (prefetched / "project-inputs.properties").is_file():
-        selection.symlink_to(prefetched / "project-inputs.properties")
-    bin_dir = state / "bin"
-    bin_dir.mkdir(exist_ok=True)
-    jdk = state / "jdk"
-    if jdk.is_symlink() or jdk.exists():
-        jdk.unlink()
-    jdk.symlink_to(prefetched / "jdk")
-    # Maven before 3.3.1 ignores .mvn/maven.config. Pass the locked settings
-    # explicitly, and select the locked JDK even when the caller has another.
-    launcher = bin_dir / "mvn"
-    if launcher.is_symlink():
-        launcher.unlink()
-    launcher.write_text(
-        "#!/bin/sh\n"
-        f"export JAVA_HOME={shlex.quote(str(jdk))}\n"
-        f"exec {shlex.quote(str(prefetched / 'maven' / 'bin' / 'mvn'))} "
-        f"-Dmaven.ext.class.path={shlex.quote(os.environ['MAVEN_PURIFIER_EXTENSION'])} "
-        "-Dmaven-purifier.replay=true "
-        f"-o --settings {shlex.quote(str(state / 'settings.xml'))} \"$@\"\n"
-    )
-    launcher.chmod(0o755)
-
-    write_maven_config(
-        root,
-        [
-            f"--settings={state / 'settings.xml'}",
-            f"-Dmaven.ext.class.path={os.environ['MAVEN_PURIFIER_EXTENSION']}",
-            f"-Dmaven-purifier.maven={lock_data['maven']['version']}",
-            "-Dmaven-purifier.replay=true",
-            *MAVEN_FLAGS,
-        ],
-    )
-    info(
-        f"Maven resolves offline from {repo} now. The locked Maven {lock_data['maven']['version']} is "
-        f"{state / 'bin' / 'mvn'}, and the JDK of Java {lock_data['javaMajor']} is {state / 'jdk'}."
-    )
-
+            lines = [
+                f"--settings={settings}",
+                *([f"--toolchains={toolchains}"] if toolchains else []),
+                f"-Dmaven.ext.class.path={extension}",
+                f"-Dmaven-purifier.maven={lock_data['maven']['version']}",
+                "-Dmaven-purifier.replay=true",
+                f"-Dmaven-purifier.root={root}",
+                f"-Dmaven-purifier.state={generation}",
+                "-Dmaven-purifier.externalInputs=true",
+                f"-Dmaven-purifier.inputs={inputs}",
+                f"-Dmaven-purifier.inputsHash={views.file_digest(inputs)}",
+                f"-Dmaven-purifier.repository={repo}",
+                *MAVEN_FLAGS,
+            ]
+            published_config, suffix = views.config_bytes(prefix, lines)
+            published_prefix, _ = views.split_config(published_config)
+            # Creating the bootstrap is not activation. Its helper takes the
+            # shared directory lock, so it cannot read this half-prepared view.
+            bootstrap, association = views.install_shim(root, sys.executable, helper)
+            roots.append(retain(association["helper"], "launch-helper"))
+            roots.append(retain(association["interpreter"], "helper-interpreter"))
+            bin_dir = generation / "bin"
+            bin_dir.mkdir(mode=0o700)
+            command = bin_dir / "maven-command"
+            command_argv = [str(prefetched / "maven/bin/mvn"), "-o", *lines]
+            views.atomic_write(command, ("#!/bin/sh\n# SPDX-License-Identifier: MIT\nexec "
+                                         + shlex.join(command_argv) + ' "$@"\n').encode(), 0o700)
+            exported = bin_dir / "mvn"
+            export_argv = [association["interpreter"], association["helper"], str(root),
+                           "--generation", str(generation)]
+            views.atomic_write(exported, ("#!/bin/sh\n# SPDX-License-Identifier: MIT\nexec "
+                                          + shlex.join(export_argv) + ' "$@"\n').encode(), 0o700)
+            files = [settings, inputs, command, exported, *([toolchains] if toolchains else [])]
+            manifest = views.complete(generation, {
+                **intent, "prefetch": str(prefetched), "prefetchSupplied": supplied,
+                "lifetimeMode": "provider-owned-no-nix" if supplied else "owned-roots",
+                "roots": roots, "helper": association,
+                "selectedLock": {"path": str(lock_path), "sha256": views.digest(authored_lock)},
+                "managedConfigHash": views.digest(suffix),
+                "publishedPrefixHash": views.digest(published_prefix),
+                "files": {str(path.relative_to(generation)): views.file_digest(path) for path in files},
+                "paths": {"repository": str(repo), "settings": str(settings), "launcher": str(command),
+                          "exportLauncher": str(exported), "projectInputs": str(inputs),
+                          "toolchains": str(toolchains) if toolchains else None},
+            })
+            views.validate(generation, root, suffix)
+            # Recheck actual authored inputs, not a stored view index. An
+            # unmanaged editor may write while the advisory lock is held.
+            if lock_path.read_bytes() != authored_lock:
+                fail("the authored lock changed while prefetch prepared its view")
+            if (config.read_bytes() if config.exists() else b"") != original_config:
+                fail("the Maven configuration changed while prefetch prepared its view")
+            if config.is_symlink() or config.parent.is_symlink():
+                fail("the Maven configuration became a symlink while prefetch prepared its view")
+            views.check_project_directory(root, project_descriptor)
+            check_fresh(root, lock_path, lock_data)
+            views.atomic_write(config, published_config, mode)
+            info(f"Maven resolves offline from {repo}. The stable launcher is {bootstrap}; "
+                 f"this pinned view's launcher is {exported} and its settings are {settings}. "
+                 f"Local builds keep your runtime environment; prefetch observed {host_java}. "
+                 f"Retain {generation}. "
+                 + ("The supplied closure and helper/tool targets remain rooted by their provider."
+                    if supplied else "Retain its append-only actual-target roots to keep this view available."))
+    except (views.StateError, OSError, subprocess.CalledProcessError, ValueError) as error:
+        fail(f"cannot activate the external Maven view: {error}")
 
 def distribution_target(root, lock_data):
     """The repository id and URL of the root POM's distributionManagement."""
