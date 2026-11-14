@@ -70,12 +70,12 @@ The lock holds what those goals need, so lock the goals you run. The lock
 run also runs the tests, so the lock holds what they need even when a Nix
 build skips them. It locks again only when a `pom.xml`, anything under
 `.mvn/`, the goals or the settings changed; `--force` locks regardless. A
-relock of an unchanged build writes the same lockfile, byte for byte. It
-keeps the recorded resolution of version ranges and SNAPSHOTs. It also
-keeps the recorded Java major version, and runs on the nixpkgs JDK of that
-version whatever `JAVA_HOME` names. A first lock runs on `JAVA_HOME`, or on
-the JDK that maven-purifier's nixpkgs provides (Java 8 for Maven 2 and 3.0). To move to another Java
-version, delete the lockfile and lock again.
+relock of an unchanged build and runtime writes the same lockfile, byte for
+byte. It keeps the recorded resolution of version ranges and SNAPSHOTs.
+Local lock and relock runs use your existing `JAVA_HOME`, or the Java
+runtime on `PATH`. The observed Java major version is recorded in the
+lockfile. Use `--force` when changing runtime, since Maven profiles and
+dependencies may depend on it.
 
 ## Maven versions
 
@@ -92,9 +92,11 @@ export PATH="$PWD/.maven-purifier/bin:$PATH"
 mvn clean install
 ```
 
-That launcher selects the locked JDK too. A first lock defaults to Java 8
-for Maven 2 and 3.0; `JAVA_HOME` can select another JDK. The plugins in your
-POM must also support the Maven and Java versions you select.
+That launcher preserves your `JAVA_HOME` or Java runtime on `PATH`.
+Local locking, dependency fetching and development do not select or build
+a Nix SDK. The plugins in your POM must support the Maven and Java
+versions you select. Full sandboxed builds use an immutable SDK, selected
+by the builder's `jdk` argument or its packaged default.
 
 Maven 2 and 3.0 lack repository download events. Their lock runs use a
 recorder goal and verify each downloaded file against its remote origin.
@@ -174,6 +176,49 @@ with), `mavenFlags`, `srcFilter` and `checkDefinition`;
 builder takes, such as `javaPackages` or `stdenvNoCC`, and
 `maven-purifier.overrideScope` replaces what the scope shares, such as
 `fetchurl`.
+
+For builds that select separate compiler and test JDKs, supply their Maven
+toolchain metadata with `jdkToolchains`:
+
+```nix
+project = pkgs.maven-purifier.buildMavenProject {
+  src = ./.;
+  jdkToolchains = [
+    {
+      jdk = pkgs.temurin-bin-27;
+      provides = { version = "27"; vendor = "temurin"; };
+    }
+    {
+      jdk = pkgs.temurin-bin-21;
+      provides = { version = "21"; vendor = "temurin"; };
+    }
+  ];
+};
+```
+
+Each `provides` value is a string matching the project's native Maven
+toolchain requirements; `version` is required. The JDK that runs Maven is
+selected by `jdk` as usual. Run capture with the project's native SDK setup,
+then configure the corresponding Nix JDKs for replay. The builder passes a
+standard toolchains XML file to Maven and includes those SDKs in its Nix
+closure. Explicit toolchain forwarding requires native Maven 3 or newer,
+which supports `--toolchains`. Maven 2 builds with no `jdkToolchains`
+continue to use the existing core JDK path.
+
+To use that same SDK configuration in the developer launcher, expose
+`project.prefetch` as a flake package (for example, `maven-prefetch`), then
+run these commands at the Maven build root:
+
+```sh
+nix build '.#maven-prefetch'
+maven-purifier prefetch --prefetched ./result
+.maven-purifier/bin/mvn clean install
+```
+
+Use the configured project's prefetch output when supplying builder options.
+The generated launcher and IDE Maven configuration then select the same
+toolchains. Prefetching an output without toolchains removes the previous
+generated toolchain binding.
 
 To use another purified JVM package without downloading its artifacts:
 
@@ -256,27 +301,43 @@ repository. For a lockfile outside the build root, the root stays in the
 build root rather than beside the lockfile. Besides what the build downloads, the lock holds what
 day-to-day development asks for: every plugin the build declares, the source
 jars of its dependencies, and the default plugins of the Maven inside the
-editor. The command copies the locked repository to
-`.maven-purifier/repository`, writes `.maven-purifier/settings.xml` with
-offline mode on, and adds lines of its own at the end of
-`.mvn/maven.config`, after the line `-Dmaven-purifier.prefetched=true`.
-Maven reads that file for every build, so `mvn`, `./mvnw` and an editor
-that reads it resolve from the locked files. The lines of `prefetch` take
-no part in the build definition, and a lock run or a Nix build leaves them
-out; delete them to resolve online again.
+editor. Prefetch creates a private external view containing a writable copy of the
+locked repository, offline settings, toolchains and project-input metadata.
+It adds a managed suffix to `.mvn/maven.config`, starting with
+`-Dmaven-purifier.prefetched=true`. Maven reads the absolute paths in this
+suffix for ordinary builds. The authored prefix is preserved; the suffix
+takes no part in the build definition and is removed from lock-run copies
+and Nix builds. Removing it restores the project's original configuration.
 
-The lines also load maven-purifier's extension, which warns when a Maven of
-another version runs: its default plugin versions differ from the locked
-ones. The locked Maven is `.maven-purifier/bin/mvn`, and nixpkgs' JDK of the
-locked Java major version is `.maven-purifier/jdk`. Put
-`.maven-purifier/bin` on `PATH`, or use a Maven wrapper that names the
-locked version.
+The stable launcher is `.maven-purifier/bin/mvn`. Its versioned bootstrap
+uses the activated view and preserves your `JAVA_HOME` and `PATH`. The
+extension warns when another Maven version runs, whose default plugins may
+differ from the locked version. Put `.maven-purifier/bin` on `PATH` to use
+the locked Maven.
+
+Views live under `$XDG_STATE_HOME/maven-purifier/v1/`, or
+`~/.local/state/maven-purifier/v1/`. The namespace identifies the canonical
+project and dependency intent; each prefetch creates a separate operation.
+Prefetch prints that view's pinned launcher and settings paths. Previous
+views stay available, including their toolchain configuration. The tool
+keeps the writable repository and directory aliases outside the source tree,
+so native file walkers do not traverse downloaded dependencies.
+
+Ordinary prefetch registers roots for the actual immutable store targets
+before activation. Keep the view and its roots to retain its tools and
+inputs. State grows until you explicitly remove owned views; there is no
+automatic pruning. With `--prefetched`, the caller owns the lifetime of the
+supplied closure and helper/tool targets. That mode makes no Nix or daemon
+calls, including when used inside a Nix build sandbox.
+
+Legacy in-tree state or an incompatible bootstrap requires an explicit
+upgrade or a fresh checkout. Prefetch leaves those files intact.
 
 ## Editor
 
 An editor that imports a Maven build, such as VS Code or Neovim through
-jdtls, or IntelliJ IDEA, runs a Maven of its own. After a prefetch, make
-`.maven-purifier/settings.xml` the editor's Maven user settings,
+jdtls, or IntelliJ IDEA, runs a Maven of its own. After a prefetch, use
+the printed generation-pinned settings path as the editor's Maven user settings,
 `java.configuration.maven.userSettings` for jdtls or *User settings file*
 in IntelliJ IDEA, and the editor resolves from the locked files without the
 network: dependencies, their source jars, and the plugins of its own Maven.
@@ -338,6 +399,11 @@ Each source of dependencies reaches the lock as follows.
   lock run read.
 - **SNAPSHOT dependencies.** The lockfile holds the timestamped files the
   lock run resolved, under both names Maven Resolver stores them under.
+- **Javadoc link metadata** is observed from the native doclet invocations.
+  The lock snapshots the package and element lists, including platform links
+  observed in generated HTML. Replay supplies them through native `offlineLinks`,
+  preserving public documentation URLs without editing the source POM. A relock
+  keeps these snapshots; `maven-purifier update` refreshes them.
 - **Files a plugin downloads itself**, outside Maven Resolver, such as the
   Node.js of frontend-maven-plugin. Maven reports nothing about them, so the
   build declares each with its URL and its path in the local repository, in
@@ -399,12 +465,11 @@ maven-purifier prefetch
 ```
 
 Commit `maven-purifier.lock.json`. The locked Maven now builds and tests
-Gson offline on the locked JDK, and an editor that reads
-`.maven-purifier/settings.xml` imports it offline:
+Gson offline with your existing Java runtime, and an editor that reads
+the generation-pinned settings file imports it offline:
 
 ```zsh
-JAVA_HOME=$PWD/.maven-purifier/jdk .maven-purifier/bin/mvn \
-  clean install
+.maven-purifier/bin/mvn clean install
 ```
 
 From the same directory, Nix builds the `gson` module with this command:

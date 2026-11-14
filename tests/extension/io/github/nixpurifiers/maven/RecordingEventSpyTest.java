@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: MIT
 package io.github.nixpurifiers.maven;
 
+import java.io.StringWriter;
+import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import org.eclipse.aether.DefaultRepositorySystemSession;
+import org.eclipse.aether.RepositoryEvent;
 import org.eclipse.aether.artifact.DefaultArtifact;
 import org.eclipse.aether.metadata.DefaultMetadata;
 import org.eclipse.aether.metadata.Metadata;
@@ -19,7 +29,120 @@ public final class RecordingEventSpyTest {
     }
   }
 
-  public static void main(String[] args) {
+  private static void snapshotsSurviveInstall() throws Exception {
+    Path root = Files.createTempDirectory("download-origin-");
+    Path artifact = root.resolve("same-tests.jar");
+    Path snapshots = root.resolve("snapshots");
+    Files.write(artifact, "published tests".getBytes(StandardCharsets.UTF_8));
+    RecordingEventSpy spy = new RecordingEventSpy();
+    StringWriter output = new StringWriter();
+    Field writer = RecordingEventSpy.class.getDeclaredField("out");
+    writer.setAccessible(true);
+    writer.set(spy, output);
+    Field directory = RecordingEventSpy.class.getDeclaredField("downloadDirectory");
+    directory.setAccessible(true);
+    directory.set(spy, snapshots);
+    RemoteRepository remote = new RemoteRepository.Builder("origin", "default", "https://example.org/repo").build();
+    org.eclipse.aether.artifact.Artifact coordinate =
+        new DefaultArtifact("example:same:jar:tests:1").setFile(artifact.toFile());
+    DefaultRepositorySystemSession session = new DefaultRepositorySystemSession();
+    session.setLocalRepositoryManager(
+        new org.eclipse.aether.internal.impl.SimpleLocalRepositoryManagerFactory().newInstance(
+            session, new org.eclipse.aether.repository.LocalRepository(root.toFile())));
+    spy.onEvent(new RepositoryEvent.Builder(session, RepositoryEvent.EventType.ARTIFACT_DOWNLOADED)
+        .setArtifact(coordinate).setRepository(remote).setFile(artifact.toFile()).build());
+    List<Path> copies;
+    try (Stream<Path> paths = Files.list(snapshots)) {
+      copies = paths.collect(Collectors.toList());
+    }
+    if (copies.size() != 1) throw new AssertionError("one successful transfer needs one snapshot");
+    Files.write(artifact, "locally built tests".getBytes(StandardCharsets.UTF_8));
+    spy.onEvent(new RepositoryEvent.Builder(session, RepositoryEvent.EventType.ARTIFACT_INSTALLED)
+        .setArtifact(coordinate).setFile(artifact.toFile()).build());
+    String installedHash = "sha256-" + java.util.Base64.getEncoder().encodeToString(
+        java.security.MessageDigest.getInstance("SHA-256").digest("locally built tests".getBytes(StandardCharsets.UTF_8)));
+    if (!output.toString().contains("\"source\":" + DocumentationCapture.json(artifact.toString()))
+        || !output.toString().contains("\"sourceHash\":" + DocumentationCapture.json(installedHash))) {
+      throw new AssertionError("install evidence must bind the actual source file and its observed bytes");
+    }
+    Files.write(artifact, "later producer output".getBytes(StandardCharsets.UTF_8));
+    try (Stream<Path> paths = Files.list(snapshots)) {
+      if (paths.filter(path -> path.getFileName().toString().startsWith("install-")).noneMatch(path -> {
+        try {
+          return "locally built tests".equals(new String(Files.readAllBytes(path), StandardCharsets.UTF_8));
+        } catch (Exception e) {
+          throw new AssertionError(e);
+        }
+      })) throw new AssertionError("producer evidence must retain the observed install bytes");
+    }
+    check("published tests", new String(Files.readAllBytes(copies.get(0)), StandardCharsets.UTF_8));
+    if (!output.toString().contains("\"snapshot\":" + DocumentationCapture.json(copies.get(0).toString()))
+        || !output.toString().contains("https://example.org/repo/example/same/1/same-1-tests.jar")
+        || !output.toString().contains("\"event\":\"install\"")) {
+      throw new AssertionError("remote input and local install must remain distinct observations");
+    }
+    if (!output.toString().contains("\"localRepository\":" + DocumentationCapture.json(root.toString()))) {
+      throw new AssertionError("capture must name the actual resolver session repository");
+    }
+    Path staged = root.resolve("staging");
+    Files.createDirectories(staged);
+    Path stagedArtifact = staged.resolve("same-tests.jar");
+    Files.copy(artifact, stagedArtifact);
+    spy.onEvent(new RepositoryEvent.Builder(session, RepositoryEvent.EventType.ARTIFACT_INSTALLED)
+        .setArtifact(coordinate).setFile(stagedArtifact.toFile())
+        .setRepository(new org.eclipse.aether.repository.LocalRepository(staged.toFile())).build());
+    if (!output.toString().contains("\"localRepository\":" + DocumentationCapture.json(staged.toString()))) {
+      throw new AssertionError("an explicit staging repository takes precedence over the parent session");
+    }
+    Path metadata = root.resolve("maven-metadata.xml");
+    Files.write(metadata, "<metadata>downloaded</metadata>".getBytes(StandardCharsets.UTF_8));
+    spy.onEvent(new RepositoryEvent.Builder(session, RepositoryEvent.EventType.METADATA_DOWNLOADED)
+        .setMetadata(new DefaultMetadata("example", "same", "maven-metadata.xml", Metadata.Nature.RELEASE))
+        .setRepository(remote).setFile(metadata.toFile()).build());
+    Files.write(metadata, "<metadata>changed</metadata>".getBytes(StandardCharsets.UTF_8));
+    try (Stream<Path> paths = Files.list(snapshots)) {
+      if (paths.noneMatch(path -> {
+        try {
+          return "<metadata>downloaded</metadata>".equals(new String(Files.readAllBytes(path), StandardCharsets.UTF_8));
+        } catch (Exception e) {
+          throw new AssertionError(e);
+        }
+      })) throw new AssertionError("metadata also needs its observed bytes");
+    }
+    Files.delete(artifact);
+    spy.onEvent(new RepositoryEvent.Builder(session, RepositoryEvent.EventType.ARTIFACT_DOWNLOADED)
+        .setArtifact(coordinate).setRepository(remote).setFile(artifact.toFile()).build());
+    if (!output.toString().contains("\"event\":\"download-error\"")) {
+      throw new AssertionError("snapshot failure must be recorded for the CLI to reject the lock");
+    }
+    spy.close();
+  }
+
+  public static void main(String[] args) throws Exception {
+    Path records = Files.createTempDirectory("nested-records-");
+    Path main = records.resolve("record.jsonl");
+    if (!main.equals(RecordingEventSpy.recordFile(main, "build"))) {
+      throw new AssertionError("first process must retain the main record");
+    }
+    Path child = RecordingEventSpy.recordFile(main, "build");
+    Path sibling = RecordingEventSpy.recordFile(main, "build");
+    Path development = RecordingEventSpy.recordFile(main, "development");
+    if (child.equals(sibling) || !child.getParent().endsWith("build")
+        || !development.getParent().endsWith("development")) {
+      throw new AssertionError("process writers and capture phases must remain separate");
+    }
+    org.apache.maven.execution.DefaultMavenExecutionRequest request =
+        new org.apache.maven.execution.DefaultMavenExecutionRequest();
+    RecordingEventSpy.prepareReplay(request);
+    if (request.isOffline()) throw new AssertionError("ordinary capture became offline");
+    System.setProperty("maven-purifier.replay", "true");
+    try {
+      RecordingEventSpy.prepareReplay(request);
+      if (!request.isOffline()) throw new AssertionError("nested replay request remained online");
+      RecordingEventSpy.prepareReplay(new Object());
+    } finally {
+      System.clearProperty("maven-purifier.replay");
+    }
     check(
         "org/apache/commons/commons-lang3/3.17.0/commons-lang3-3.17.0.jar",
         RecordingEventSpy.artifactPath(
@@ -66,6 +189,7 @@ public final class RecordingEventSpyTest {
         RecordingEventSpy.url(withSlash, "a/b/1/b-1.jar"));
     check("https://maven.google.com/a/b/1/b-1.jar", RecordingEventSpy.url(withoutSlash, "a/b/1/b-1.jar"));
 
+    snapshotsSurviveInstall();
     System.out.println("RecordingEventSpyTest: all checks passed");
   }
 }

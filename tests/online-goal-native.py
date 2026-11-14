@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 
 
 def main():
@@ -38,7 +39,11 @@ def main():
         run([launcher, "clean", "install"])
         bom = json.loads((source / "target/bom.json").read_text())
         assert any(component["name"] == "commons-lang3" for component in bom["components"])
-        repository = source / ".maven-purifier/repository"
+        managed = (source / ".mvn/maven.config").read_text().split(
+            "-Dmaven-purifier.prefetched=true\n", 1)[1].splitlines()
+        settings = Path(next(line.split("=", 1)[1] for line in managed if line.startswith("--settings=")))
+        repository = Path(next(element.text for element in ET.parse(settings).getroot().iter()
+                               if element.tag.rsplit("}", 1)[-1] == "localRepository"))
         jar = repository / "org/apache/commons/commons-lang3/3.17.0/commons-lang3-3.17.0.jar"
         jar.unlink()
         log = run([launcher, "clean", "install"], success=False)
